@@ -19,8 +19,9 @@ Built for TechZephyr 4.0 (IIT Bhubaneswar), problem statement "Sketch2Shape AI".
 sketch (canvas or upload) + optional description
   1 preprocess    OpenCV: flatten, invert if dark, even out paper lighting, threshold, drop specks,
                   crop and centre, square to 1024 px, close gaps, thicken thin lines, fill a silhouette
-  2 understand    name the object: one Claude call if ANTHROPIC_API_KEY is set, otherwise CLIP zero-shot
-                  over ~170 everyday objects; build the prompt (a typed description always wins)
+  2 understand    name the object: one vision-LLM call if OPENAI_API_KEY (or ANTHROPIC_API_KEY) is set,
+                  otherwise CLIP zero-shot over ~170 everyday objects; build the prompt (a typed description
+                  always wins)
   3 generate      SDXL + xinsir scribble ControlNet: 2 product-style photos that keep the sketch's outline
   4 score         gate 1: sketch-line recall vs image edges, silhouette IoU, CLIP agreement
                   -> below threshold: regenerate with new seeds and stronger conditioning (max 2 rounds)
@@ -69,11 +70,14 @@ architecture evaluation is in `docs/Sketch2Shape Architecture Decision.pdf`.
 | [madebyollin/sdxl-vae-fp16-fix](https://huggingface.co/madebyollin/sdxl-vae-fp16-fix) | fp16-safe SDXL VAE | MIT |
 | [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) (shape turbo + paint) | image to textured 3D, background removal | Tencent Hunyuan community / non-commercial licence |
 | [CLIP ViT-B/32](https://huggingface.co/openai/clip-vit-base-patch32) | naming the object, scoring | MIT |
-| Claude API (optional, `claude-opus-5-5`) | naming the object from the sketch | external service, needs `ANTHROPIC_API_KEY` |
+| OpenAI API (optional; first available of `gpt-4.1-mini`, `gpt-5-mini`, `gpt-4o-mini`) | naming the object and its shape from the sketch (one call, image sent at low detail, well under a cent) | external service, needs `OPENAI_API_KEY` |
+| Claude API (optional alternative, `claude-opus-5-5`) | same, used when only `ANTHROPIC_API_KEY` is set | external service |
 | diffusers, transformers, OpenCV, trimesh, Gradio | libraries | Apache-2.0 / MIT / BSD |
 
-External services: model weights download from Hugging Face on first run; the Claude call is optional
-and the pipeline runs fully without it.
+External services: model weights download from Hugging Face on first run; the LLM naming call is
+optional and the pipeline runs fully without it (any API error, refusal or missing key falls back to
+CLIP). Keep keys in environment variables or Kaggle Secrets, never in the code. Run details show which
+one named the object (`named_by`: `openai:<model>`, `anthropic:<model>`, `clip` or `none`).
 
 ## Hardware and run time
 
@@ -99,7 +103,7 @@ Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
 ### On Kaggle (free, recommended)
 
 1. Create a notebook from `notebooks/kaggle_run.ipynb` (File, Import Notebook). It clones https://github.com/RohanSaikumar/sketch2shape.
-2. Session options: Accelerator **GPU T4 x2**, Internet **On**. Optionally add `ANTHROPIC_API_KEY` and `HF_TOKEN` as secrets.
+2. Session options: Accelerator **GPU T4 x2**, Internet **On**. Optionally add `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) and `HF_TOKEN` as secrets.
 3. Run All (change `REPO_URL` in the first cell only for a fork). It runs setup, the offline tests and all example sketches, shows the results, then the app with a public link.
 
 ### On a Linux machine with an NVIDIA GPU

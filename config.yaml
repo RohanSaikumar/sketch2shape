@@ -16,10 +16,12 @@ preprocess:
 
 understand:
   llm:
-    enabled: true             # used only when ANTHROPIC_API_KEY is set; CLIP is used otherwise
-    model: claude-opus-5-5
-    effort: low
-    server_fallback: true     # re-run on a fallback model if the request is declined
+    enabled: true             # one optional vision call that names the sketch; CLIP is used without a key
+    provider: auto            # auto = OpenAI if OPENAI_API_KEY is set, else Claude if ANTHROPIC_API_KEY; or openai / anthropic
+    openai_models: [gpt-4.1-mini, gpt-5-mini, gpt-4o-mini]   # tried in order; the first one the key can use is used
+    anthropic_model: claude-opus-5-5
+    effort: low               # Claude only
+    server_fallback: true     # Claude only: re-run on a fallback model if the request is declined
     timeout_s: 30
   clip_model: openai/clip-vit-base-patch32
   clip_min_confidence: 0.25   # calibrate

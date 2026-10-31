@@ -9,5 +9,6 @@ opencv-python>=4.8
 numpy
 pillow
 pyyaml>=6.0
+openai>=1.40        # optional: only used when OPENAI_API_KEY is set
 anthropic>=0.70     # optional: only used when ANTHROPIC_API_KEY is set
 pytest

@@ -1,14 +1,16 @@
 """Stage 2: name the sketched object and build the image-generation prompt.
 
-With ANTHROPIC_API_KEY set, one Claude call names the object and notes its visible shape features.
-Without a key, or on any API error or refusal, CLIP picks a name from a fixed list instead, so the
-pipeline never depends on the key. A typed user prompt always wins over the guessed name.
+With an LLM API key set, one vision call names the object and notes its visible shape features:
+OpenAI when OPENAI_API_KEY is set, otherwise Claude when ANTHROPIC_API_KEY is set (config can force
+either). Without a key, or on any API error or refusal, CLIP picks a name from a fixed list instead, so
+the pipeline never depends on a key. A typed user prompt always wins over the guessed name.
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -36,11 +38,88 @@ NAMING_SCHEMA = {
 }
 
 
-def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
-    """Ask Claude what the sketch shows. Returns (result or None, note for the run log)."""
+JSON_REPLY = (" Reply only with a JSON object with the keys object (string), details (string) and "
+              "confidence (number).")
+
+
+def parse_naming(text: str) -> dict | None:
+    """The naming answer from a model's JSON reply, or None if it holds no usable name."""
+    match = re.search(r"\{.*\}", text or "", re.S)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    name = str(data.get("object", "")).strip().lower()
+    if not name:
+        return None
+    try:
+        confidence = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return {"label": name, "details": str(data.get("details", "")).strip(), "confidence": confidence}
+
+
+def name_with_llm(image_path: Path, cfg) -> tuple[dict | None, str]:
+    """Pick the provider from config and the keys present. Returns (result or None, note for the run log)."""
     llm = cfg.understand.llm
     if not llm.enabled:
         return None, ""
+    provider = llm.provider
+    if provider == "auto":
+        provider = ("openai" if os.environ.get("OPENAI_API_KEY")
+                    else "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None)
+    if provider == "openai":
+        return openai_name(image_path, cfg)
+    if provider == "anthropic":
+        return claude_name(image_path, cfg)
+    return None, "No LLM API key set (OPENAI_API_KEY or ANTHROPIC_API_KEY); using CLIP instead."
+
+
+def openai_name(image_path: Path, cfg) -> tuple[dict | None, str]:
+    """Ask an OpenAI vision model what the sketch shows, trying the configured models in order."""
+    llm = cfg.understand.llm
+    if not os.environ.get("OPENAI_API_KEY"):
+        return None, "No OPENAI_API_KEY set; using CLIP instead."
+    try:
+        import openai
+    except ImportError:
+        return None, "The openai package is not installed; using CLIP instead."
+
+    client = openai.OpenAI(timeout=float(llm.timeout_s), max_retries=1)
+    image_url = "data:image/png;base64," + base64.standard_b64encode(Path(image_path).read_bytes()).decode()
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": NAMING_PROMPT + JSON_REPLY},
+        {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}},   # low detail: cheap, enough for a sketch
+    ]}]
+    skipped = []
+    for model in llm.openai_models:
+        try:
+            response = client.chat.completions.create(model=model, messages=messages,
+                                                      response_format={"type": "json_object"})
+        except (openai.NotFoundError, openai.BadRequestError, openai.PermissionDeniedError) as exc:
+            skipped.append(f"{model}: {type(exc).__name__}")       # model not available to this key: try the next
+            continue
+        except openai.AuthenticationError:
+            return None, "OpenAI rejected the API key; using CLIP instead."
+        except openai.RateLimitError:
+            return None, "OpenAI rate limit or quota reached; using CLIP instead."
+        except openai.APIConnectionError:
+            return None, "Could not reach the OpenAI API; using CLIP instead."
+        except openai.APIStatusError as exc:
+            return None, f"OpenAI API error {exc.status_code}; using CLIP instead."
+        named = parse_naming(response.choices[0].message.content)
+        if not named:
+            return None, f"{model} gave no usable name; using CLIP instead."
+        named["source"] = f"openai:{model}"
+        return named, ""
+    return None, f"No configured OpenAI model was usable ({'; '.join(skipped)}); using CLIP instead."
+
+
+def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
+    """Ask Claude what the sketch shows. Returns (result or None, note for the run log)."""
+    llm = cfg.understand.llm
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return None, "No ANTHROPIC_API_KEY set; using CLIP instead."
     try:
@@ -51,7 +130,7 @@ def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
     client = anthropic.Anthropic(timeout=float(llm.timeout_s), max_retries=1)
     image_data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("utf-8")
     request = dict(
-        model=llm.model,
+        model=llm.anthropic_model,
         max_tokens=4096,
         output_config={"effort": llm.effort, "format": {"type": "json_schema", "schema": NAMING_SCHEMA}},
         messages=[{
@@ -82,15 +161,11 @@ def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
     text = next((block.text for block in response.content if block.type == "text"), None)
     if not text:
         return None, "Claude returned no text; using CLIP instead."
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return None, "Claude returned malformed JSON; using CLIP instead."
-    name = str(data.get("object", "")).strip().lower()
-    if not name:
-        return None, "Claude could not name the object; using CLIP instead."
-    return {"label": name, "details": str(data.get("details", "")).strip(),
-            "confidence": float(data.get("confidence", 0.5))}, ""
+    named = parse_naming(text)
+    if not named:
+        return None, "Claude gave no usable name; using CLIP instead."
+    named["source"] = f"anthropic:{llm.anthropic_model}"
+    return named, ""
 
 
 def clip_zero_shot(models, images: list[Image.Image], labels: list[str], template: str) -> np.ndarray:
@@ -127,11 +202,11 @@ def build_prompt(label: str | None, details: str, user_prompt: str, cfg) -> str:
 
 
 def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
-    named, note = claude_name(sketch.lineart_path, cfg)
+    named, note = name_with_llm(sketch.lineart_path, cfg)
     if note:
         store.warn(note)
     if named:
-        label, details, confidence, source = named["label"], named["details"], named["confidence"], "llm"
+        label, details, confidence, source = named["label"], named["details"], named["confidence"], named["source"]
     else:
         lineart = Image.open(sketch.lineart_path).convert("RGB")
         probs = clip_zero_shot(models, [lineart], OBJECTS, "a black and white sketch of {}")[0]
