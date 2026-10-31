@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import inspect
 import queue
 import threading
@@ -128,6 +129,40 @@ def run_summary(manifest: dict) -> dict:
         "warnings": manifest.get("warnings"),
         "run_folder": manifest.get("run_id"),
     }
+
+
+def past_runs(runs_dir: Path) -> list[tuple[str, str]]:
+    """Finished runs with a model, newest first, as (label, run folder name) for a dropdown."""
+    choices = []
+    for manifest_path in sorted(Path(runs_dir).glob("*/manifest.json"), reverse=True):
+        run_dir = manifest_path.parent
+        if not (run_dir / "model.glb").exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        name = (manifest.get("intent") or {}).get("label") or "object"
+        prompt = (manifest.get("inputs") or {}).get("prompt") or ""
+        took = (manifest.get("result") or {}).get("total_s")
+        label = f"{manifest.get('started', run_dir.name)} | {name}" + (f" | \"{prompt[:30]}\"" if prompt else "") \
+            + (f" | {took:.0f} s" if took else "")
+        choices.append((label, run_dir.name))
+    return choices
+
+
+def show_past_run(runs_dir: Path, run_name: str | None):
+    """Model, images and downloads of an earlier run."""
+    if not run_name:
+        return None, None, []
+    run_dir = Path(runs_dir) / run_name
+    try:
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    files = [str(p) for p in (run_dir / "model.glb", run_dir / "model_obj.zip") if p.exists()]
+    glb = run_dir / "model.glb"
+    return (str(glb) if glb.exists() else None), (files or None), gallery_items(run_dir, manifest)
 
 
 def has_strokes(canvas) -> bool:
@@ -282,13 +317,26 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
         gallery = gr.Gallery(label="Steps so far", columns=5, height=240)
         with gr.Accordion("Run details", open=False):
             details = gr.JSON(label="Run summary")
+        runs_dir = Path(pipeline.cfg.runs_dir)
+        with gr.Accordion("Previous models (kept while this app runs)", open=False):
+            with gr.Row():
+                history = gr.Dropdown(choices=past_runs(runs_dir), label="Pick an earlier run", scale=4)
+                refresh = gr.Button("Refresh list", scale=1)
+            with gr.Row():
+                old_viewer = gr.Model3D(label="Earlier model (drag to rotate)", clear_color=(1, 1, 1, 1), height=360)
+                old_files = gr.File(label="Its downloads", file_count="multiple")
+            old_gallery = gr.Gallery(label="Its steps", columns=5, height=200)
 
         draw_tab.select(lambda: "canvas", None, mode)
         upload_tab.select(lambda: "upload", None, mode)
         (button.click(lambda: gr.update(interactive=False, value="Working... please wait"), None, button, queue=False)
                .then(make_model, [canvas, upload, prompt, mode], [viewer, files, gallery, details, status],
                      show_progress="hidden")
-               .then(lambda: gr.update(interactive=True, value="Make 3D model"), None, button, queue=False))
+               .then(lambda: gr.update(interactive=True, value="Make 3D model"), None, button, queue=False)
+               .then(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False))
+        refresh.click(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False)
+        history.change(lambda name: show_past_run(runs_dir, name), history, [old_viewer, old_files, old_gallery],
+                       queue=False)
     return demo
 
 
