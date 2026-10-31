@@ -99,8 +99,6 @@ def clip_zero_shot(models, images: list[Image.Image], labels: list[str], templat
     model, processor = models.clip()
     inputs = processor(text=[template.format(with_article(label)) for label in labels], images=images,
                        return_tensors="pt", padding=True)
-    inputs = {key: value.to(model.device) for key, value in inputs.items()}
-    inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
     with torch.no_grad():
         logits = model(**inputs).logits_per_image.float()
     return logits.softmax(dim=-1).cpu().numpy()

@@ -2,10 +2,11 @@
 
 runs_dir: runs
 time_budget_s: 900            # whole run; retries stop once this is spent and the best result so far is exported
+worker_timeout_s: 1800        # one GPU worker job; the first run also downloads the model weights
 
-gpus:                         # measured on Kaggle T4s (15 GB each)
-  sdxl: 0                     # SDXL + ControlNet + CLIP: 13.4 GB peak for 2 images
-  hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB) and texture (12.8 GB); set to 0 on a single-GPU machine
+gpus:                         # each heavy step runs in its own worker process on this GPU (T4: 15 GB)
+  sdxl: 0                     # SDXL + ControlNet: 13.4 GB peak for 2 images
+  hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB), then texture (12.8 GB); 0 also works on a single GPU
 
 preprocess:
   size: 1024
@@ -59,8 +60,6 @@ reconstruct:
   seed: 1234
   max_shape_attempts: 2
   texture: true
-  park_on_cpu: false          # shape (<= 9.4 GB) and texture (12.8 GB) take turns on GPU 1. false: the idle one is
-                              # released and reloaded (~1 min each); true keeps it in CPU RAM, which overflowed Kaggle's 30 GB
   paint_cpu_offload_on_oom: true
 
 validate:

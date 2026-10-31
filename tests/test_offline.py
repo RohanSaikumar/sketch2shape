@@ -209,6 +209,16 @@ def test_state_machine_exports_best_mesh_after_an_unexpected_error(cfg):
                                                      "next": "export", "seconds": ctx.store.manifest["transitions"][-2]["seconds"]}
 
 
+def test_worker_process_round_trip(cfg, store):
+    from sketch2shape.models import ModelManager, WorkerError
+    models = ModelManager(cfg)
+    result = models.run_worker("ping", "sdxl", store)
+    assert result["ok"] and result["python"]
+    with pytest.raises(WorkerError):
+        models.run_worker("no_such_task", "sdxl", store)
+    assert list(store.dir.glob("worker_no_such_task_*.log"))
+
+
 def test_empty_sketch_fails_with_a_message(cfg):
     pipe = Sketch2Shape(cfg, models=object())
     result = pipe.run(Image.new("RGBA", (256, 256), (0, 0, 0, 0)), source="canvas")

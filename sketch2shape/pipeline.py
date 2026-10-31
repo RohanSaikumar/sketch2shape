@@ -259,10 +259,9 @@ class Sketch2Shape:
         seed = int(r.seed) + ctx.shape_attempts * 7919
         ctx.shape_attempts += 1
         try:
-            ctx.mesh = make_shape(self.models, ctx.prepared, seed)
+            ctx.mesh = make_shape(self.models, ctx.prepared, seed, ctx.store, self.cfg)
         except Exception as exc:
-            ctx.store.warn(f"Shape attempt {ctx.shape_attempts} (seed {seed}) failed: {exc!r}")
-            self.models.free_memory()
+            ctx.store.warn(f"Shape attempt {ctx.shape_attempts} (seed {seed}) failed: {exc}")
             if ctx.shape_attempts < r.max_shape_attempts and not ctx.over_budget():
                 return "retry"
             if ctx.best_shape is not None:      # an earlier attempt produced a shape: keep it
@@ -270,7 +269,6 @@ class Sketch2Shape:
                 return "use_best"
             ctx.message = "3D shape generation failed. See manifest.json for the error."
             return "error"
-        ctx.mesh.export(ctx.store.path(f"07_shape_try{ctx.shape_attempts}.glb"))
         ctx.store.manifest.setdefault("shape_seeds", []).append(seed)
         return "ok"
 
@@ -297,10 +295,9 @@ class Sketch2Shape:
             ctx.final_mesh = self._projected(ctx, "texturing is off" if not r.texture else "the time budget was spent")
             return "fallback"
         try:
-            ctx.textured, ctx.texture_mode = paint_mesh(self.models, ctx.mesh, ctx.prepared, self.cfg)
+            ctx.textured, ctx.texture_mode = paint_mesh(self.models, ctx.mesh, ctx.prepared, ctx.store, self.cfg)
         except Exception as exc:
-            self.models.free_memory()
-            ctx.final_mesh = self._projected(ctx, f"texturing failed ({exc!r})")
+            ctx.final_mesh = self._projected(ctx, f"texturing failed ({exc})")
             return "fallback"
         return "ok"
 
