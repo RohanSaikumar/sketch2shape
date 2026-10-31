@@ -171,6 +171,36 @@ def test_export_round_trip_keeps_geometry_and_texture(cfg, store):
     assert "model.obj" in names and any(n.endswith(".mtl") for n in names)
 
 
+def glb_json(path):
+    import json
+    import struct
+    data = open(path, "rb").read()
+    length = struct.unpack_from("<I", data, 12)[0]
+    assert struct.unpack_from("<I", data, 8)[0] == len(data)        # header length still matches the file
+    return json.loads(data[20:20 + length])
+
+
+@pytest.mark.parametrize("make", ["textured", "vertex colours"])
+def test_exported_materials_are_matte(cfg, store, tmp_path, make):
+    """glTF reads a missing metallicFactor as 1.0 (metal), which viewers show as black."""
+    if make == "textured":
+        mesh = textured_sphere()
+    else:
+        rgba = tmp_path / "p.png"
+        Image.new("RGBA", (64, 64), (200, 30, 30, 255)).save(rgba)
+        mesh = project_colours(trimesh.creation.icosphere(subdivisions=3), rgba)
+    bundle = export_mesh(mesh, store, cfg)
+    gltf = glb_json(bundle.glb_path)
+    assert gltf["materials"]
+    for material in gltf["materials"]:
+        assert material["pbrMetallicRoughness"]["metallicFactor"] == 0.0
+        assert material["pbrMetallicRoughness"]["baseColorFactor"] == [1.0, 1.0, 1.0, 1.0]
+    for m in gltf["meshes"]:
+        for primitive in m["primitives"]:
+            assert "material" in primitive
+    assert bundle.reload_ok
+
+
 # ------------------------------------------------------------ state machine
 
 def test_every_working_state_has_a_way_out():
