@@ -97,11 +97,17 @@ def clip_zero_shot(models, images: list[Image.Image], labels: list[str], templat
     """Probability of each label for each image, from CLIP image-text similarity."""
     import torch
     model, processor = models.clip()
-    inputs = processor(text=[template.format(with_article(label)) for label in labels], images=images,
-                       return_tensors="pt", padding=True)
-    with torch.no_grad():
-        logits = model(**inputs).logits_per_image.float()
-    return logits.softmax(dim=-1).cpu().numpy()
+    texts = [template.format(with_article(label)) for label in labels]
+    try:                                    # fast path: label embeddings are computed once and cached
+        text = models.clip_text_features(texts)
+        image = models.clip_image_features(images)
+        with torch.no_grad():
+            logits = model.logit_scale.exp() * image @ text.T    # same as CLIPModel's logits_per_image
+    except Exception:                       # e.g. a transformers version with different internals
+        inputs = processor(text=texts, images=images, return_tensors="pt", padding=True)
+        with torch.no_grad():
+            logits = model(**inputs).logits_per_image
+    return logits.float().softmax(dim=-1).cpu().numpy()
 
 
 def with_article(noun: str) -> str:

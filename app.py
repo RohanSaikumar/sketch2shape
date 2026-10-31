@@ -19,6 +19,7 @@ from pathlib import Path
 import gradio as gr
 
 from sketch2shape import Sketch2Shape, load_config
+from sketch2shape.models import relaunch_with_lean_malloc
 
 # step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end)
 STEPS = {
@@ -169,6 +170,7 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
 
 
 def main() -> None:
+    relaunch_with_lean_malloc()
     parser = argparse.ArgumentParser(description="Sketch2Shape web app")
     parser.add_argument("--share", action="store_true", help="create a public gradio.live link")
     parser.add_argument("--config", help="path to a config.yaml")

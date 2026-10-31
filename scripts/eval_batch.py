@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sketch2shape import Sketch2Shape, load_config  # noqa: E402
+from sketch2shape.models import relaunch_with_lean_malloc  # noqa: E402
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -48,6 +49,7 @@ def main() -> None:
     parser.add_argument("--out", default="results")
     parser.add_argument("--config")
     args = parser.parse_args()
+    relaunch_with_lean_malloc()
 
     import torch
     if not torch.cuda.is_available():

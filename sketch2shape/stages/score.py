@@ -8,6 +8,8 @@ The ControlNet keeps the sketch's framing, so sketch and image line up pixel for
 """
 from __future__ import annotations
 
+import time
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -75,15 +77,20 @@ def score_candidates(models, sketch, intent, candidates, cfg, store) -> None:
     strokes = load_mask(sketch.lineart_path, invert=True)
     sketch_shape = load_mask(sketch.mask_path)
     tolerance = float(s.edge_tolerance) * SIZE
+    timings = store.manifest.setdefault("score_timings_s", [])
     clip_scores = None
     if intent.label:
+        started = time.monotonic()
         try:
             clip_scores = clip_agreement(models, intent, candidates)
         except Exception as exc:
             store.warn(f"CLIP agreement skipped: {exc!r}")
+        timings.append({"clip": round(time.monotonic() - started, 1)})
     weights = vars(s.weights)
     for i, candidate in enumerate(candidates):
+        started = time.monotonic()
         mask = candidate_mask(models, candidate, store)
+        timings.append({f"cutout_{candidate.path.stem}": round(time.monotonic() - started, 1)})
         fidelity = stroke_fidelity(strokes, candidate_edges(candidate, mask), tolerance)
         candidate.scores = {"edges": fidelity["f2"], "edge_recall": fidelity["recall"],
                             "edge_precision": fidelity["precision"],

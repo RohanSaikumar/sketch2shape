@@ -31,6 +31,7 @@ class ModelManager:
         self.cfg = cfg
         self._clip = None
         self._bg = None
+        self._text_cache: dict = {}
 
     # --------------------------------------------------------- GPU workers
 
@@ -46,7 +47,9 @@ class ModelManager:
         result_path = store.path(f"worker_{tag}_result.json")
         log_path = store.path(f"worker_{tag}.log")
         job_path.write_text(json.dumps({"task": task, **job}, default=str), encoding="utf-8")
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu_index(role)), PYTHONUNBUFFERED="1")
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu_index(role)), PYTHONUNBUFFERED="1",
+                   **LEAN_MALLOC)
+        free_memory()                       # give this process's spare memory back before a worker loads
         with open(log_path, "w", encoding="utf-8") as log:
             # own process group, so anything the worker starts is cleaned up with it
             proc = subprocess.Popen([sys.executable, "-m", "sketch2shape.worker", str(job_path), str(result_path)],
@@ -76,6 +79,29 @@ class ModelManager:
             self._clip = (CLIPModel.from_pretrained(name).eval(), CLIPProcessor.from_pretrained(name))
         return self._clip
 
+    def clip_text_features(self, texts: list[str]):
+        """Normalised CLIP text embeddings, computed once per text and reused (CPU text encoding is slow)."""
+        import torch
+        model, processor = self.clip()
+        missing = [t for t in dict.fromkeys(texts) if t not in self._text_cache]
+        if missing:
+            inputs = processor(text=missing, return_tensors="pt", padding=True)
+            with torch.no_grad():       # text tower + projection: stable across transformers versions
+                pooled = model.text_model(input_ids=inputs["input_ids"],
+                                          attention_mask=inputs["attention_mask"]).pooler_output
+                features = model.text_projection(pooled)
+            features = features / features.norm(dim=-1, keepdim=True)
+            self._text_cache.update(zip(missing, features))
+        return torch.stack([self._text_cache[t] for t in texts])
+
+    def clip_image_features(self, images):
+        import torch
+        model, processor = self.clip()
+        with torch.no_grad():
+            pixels = processor(images=images, return_tensors="pt")["pixel_values"]
+            features = model.visual_projection(model.vision_model(pixel_values=pixels).pooler_output)
+        return features / features.norm(dim=-1, keepdim=True)
+
     def bg_remover(self):
         if self._bg is None:
             from hy3dgen.rembg import BackgroundRemover
@@ -83,7 +109,29 @@ class ModelManager:
         return self._bg
 
     def free_memory(self) -> None:
-        gc.collect()
+        free_memory()
+
+
+# glibc keeps freed memory inside the process by default; PyTorch model loading frees a lot of it, so a
+# worker's RAM keeps climbing. These limits return large freed blocks to the system straight away.
+LEAN_MALLOC = {"MALLOC_ARENA_MAX": "2", "MALLOC_MMAP_THRESHOLD_": "131072", "MALLOC_TRIM_THRESHOLD_": "131072"}
+
+
+def relaunch_with_lean_malloc() -> None:
+    """Restart the current script with LEAN_MALLOC set (the allocator reads it only at start-up). Linux only."""
+    if sys.platform.startswith("linux") and any(os.environ.get(k) != v for k, v in LEAN_MALLOC.items()):
+        os.execve(sys.executable, [sys.executable, *sys.argv],
+                  {**os.environ, **LEAN_MALLOC, "PYTHONUNBUFFERED": "1"})
+
+
+def free_memory() -> None:
+    """Collect garbage and hand freed heap memory back to the operating system (Linux)."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
 
 
 _GPU_COUNT = None

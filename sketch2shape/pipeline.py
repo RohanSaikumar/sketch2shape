@@ -17,7 +17,7 @@ from typing import Callable
 
 from .config import load_config
 from .contracts import Candidate, ExportBundle, Intent, PreparedImage, SketchAsset
-from .models import ModelManager, rss_gb
+from .models import ModelManager, free_memory, rss_gb
 from .runstore import RunStore
 from .stages.export import export_mesh
 from .stages.generate import generate
@@ -189,6 +189,7 @@ class Sketch2Shape:
                 ctx.store.manifest.setdefault("errors", []).append(
                     {"state": state.value, "traceback": traceback.format_exc()[-3000:]})
             seconds = time.monotonic() - started
+            free_memory()                   # keep the main process small for the next GPU worker
             ctx.store.add_time(state.value, seconds)
             nxt = TRANSITIONS.get((state, outcome)) or self._recover(ctx, state)
             ctx.store.manifest["transitions"].append(
