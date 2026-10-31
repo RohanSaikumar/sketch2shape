@@ -124,6 +124,15 @@ def relaunch_with_lean_malloc() -> None:
                   {**os.environ, **LEAN_MALLOC, "PYTHONUNBUFFERED": "1"})
 
 
+def stop_leftover_workers() -> None:
+    """Stop GPU workers left running by an app or batch that was interrupted (they hold GPU and RAM). Linux."""
+    if sys.platform.startswith("linux"):
+        # "[.]" so the pattern never matches a shell whose own command line contains it
+        found = subprocess.run(["pkill", "-9", "-f", "sketch2shape[.]worker"], capture_output=True).returncode == 0
+        if found:
+            print("Stopped GPU worker(s) left over from an interrupted run.", flush=True)
+
+
 def free_memory() -> None:
     """Collect garbage and hand freed heap memory back to the operating system (Linux)."""
     gc.collect()
