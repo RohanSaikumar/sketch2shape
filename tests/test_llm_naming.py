@@ -8,16 +8,18 @@ import pytest
 from PIL import Image
 
 from sketch2shape.config import load_config
-from sketch2shape.contracts import SketchAsset
+from sketch2shape.contracts import Intent, SketchAsset
 from sketch2shape.runstore import RunStore
+from sketch2shape.stages.generate import sketch_control
 from sketch2shape.stages.understand import name_with_llm, parse_naming, understand
 
 GOOD = ('{"object": "Headphones", "details": "arched band, two round ear cups", '
-        '"material": "matte black plastic", "confidence": 0.9}')
+        '"material": "matte black plastic", "drawing": "clean", "confidence": 0.9}')
+ROUGH = GOOD.replace('"clean"', '"rough"')
 
 
 def fake_openai(behaviour: dict) -> types.ModuleType:
-    """A stand-in for the openai package; behaviour maps model name to 'ok', 'missing', 'bad key' or 'junk'."""
+    """A stand-in for the openai package; behaviour maps model name to 'ok', 'rough', 'missing', 'bad key' or 'junk'."""
     module = types.ModuleType("openai")
     module.APIStatusError = type("APIStatusError", (Exception,), {"status_code": 500})
     for name in ("NotFoundError", "BadRequestError", "PermissionDeniedError", "AuthenticationError", "RateLimitError"):
@@ -35,7 +37,7 @@ def fake_openai(behaviour: dict) -> types.ModuleType:
                 raise module.NotFoundError(model)
             if what == "bad key":
                 raise module.AuthenticationError("invalid key")
-            content = GOOD if what == "ok" else "I cannot tell."
+            content = {"ok": GOOD, "rough": ROUGH}.get(what, "I cannot tell.")
             return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))])
 
     class OpenAI:
@@ -98,15 +100,35 @@ def test_understand_uses_the_llm_name_in_the_prompt(cfg, sketch_png, monkeypatch
     use_openai(monkeypatch, {"model-a": "ok", "model-b": "ok"})
     sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
     intent = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
-    assert intent.source == "openai:model-a" and intent.label == "headphones"
+    assert intent.source == "openai:model-a" and intent.label == "headphones" and intent.drawing == "clean"
     assert intent.prompt.startswith("a headphones, matte black plastic, arched band, two round ear cups")
+    assert cfg.generate.rough.prompt not in intent.prompt and intent.negative_prompt == cfg.generate.negative_prompt
     # a typed description decides appearance: the LLM's material suggestion is not added
     typed = understand(models=None, sketch=sketch, user_prompt="red leather headphones", cfg=cfg,
                        store=RunStore(tmp_path / "r2"))
     assert "matte black plastic" not in typed.prompt and typed.prompt.startswith("red leather headphones")
 
 
+def test_a_rough_doodle_is_loosened_and_asked_to_look_real(cfg, sketch_png, monkeypatch, tmp_path):
+    use_openai(monkeypatch, {"model-a": "rough", "model-b": "ok"})
+    sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
+    rough = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
+    g = cfg.generate
+    assert rough.drawing == "rough" and g.rough.prompt in rough.prompt
+    assert rough.negative_prompt.endswith(g.rough.negative_prompt)
+    # lighter, shorter control in the first round only; a retry follows the lines on every step again
+    assert sketch_control(rough, 0.7, 0, g) == (g.rough.control_scale, g.rough.control_end)
+    assert sketch_control(rough, 0.8, 1, g) == (0.8, 1.0)
+    for drawing in ("clean", ""):                             # clean, or no LLM judgement: unchanged control
+        assert sketch_control(Intent("mug", 0.9, "clip", "a mug", "", drawing=drawing), 0.7, 0, g) == (0.7, 1.0)
+    # a typed description decides appearance: no realism words or extra negatives, but the control is still lighter
+    typed = understand(models=None, sketch=sketch, user_prompt="a cartoon cat", cfg=cfg, store=RunStore(tmp_path / "r3"))
+    assert g.rough.prompt not in typed.prompt and typed.negative_prompt == g.negative_prompt
+    assert sketch_control(typed, 0.7, 0, g)[1] == g.rough.control_end
+
+
 def test_parse_naming_accepts_fenced_json():
     named = parse_naming("```json\n" + GOOD + "\n```")
-    assert named["label"] == "headphones" and named["confidence"] == 0.9
+    assert named["label"] == "headphones" and named["confidence"] == 0.9 and named["drawing"] == "clean"
+    assert parse_naming(GOOD.replace('"clean"', '"sloppy"'))["drawing"] == ""    # unknown answers count as unknown
     assert parse_naming("no json here") is None

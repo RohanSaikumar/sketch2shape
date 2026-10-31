@@ -61,6 +61,7 @@ def task_generate(job: dict) -> dict:
             images = pipe(
                 job["prompt"], negative_prompt=job["negative_prompt"], image=control,
                 controlnet_conditioning_scale=float(job["control_scale"]),
+                control_guidance_end=float(job.get("control_end", 1.0)),   # share of the steps the sketch guides
                 num_inference_steps=int(job["steps"]), guidance_scale=float(job["guidance_scale"]),
                 num_images_per_prompt=n, width=size, height=size,
                 generator=torch.Generator("cuda").manual_seed(int(job["seed"])),

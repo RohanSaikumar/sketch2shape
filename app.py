@@ -120,7 +120,10 @@ def run_summary(manifest: dict) -> dict:
     return {
         "object": intent.get("label"),
         "named_by": intent.get("source"),
+        "drawing": intent.get("drawing") or "not judged (no LLM)",
         "prompt_used": intent.get("prompt"),
+        "candidates": [{key: c.get(key) for key in ("round", "control_scale", "total", "scores")}
+                       for c in manifest.get("candidates") or []],
         "result": manifest.get("result"),
         "export": manifest.get("export"),
         "timings_s": manifest.get("timings_s"),

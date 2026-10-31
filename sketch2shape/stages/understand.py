@@ -20,12 +20,15 @@ from ..contracts import Intent
 from ..vocab import OBJECTS
 
 NAMING_PROMPT = (
-    "This is a rough hand-drawn sketch of one object that will be turned into a 3D model. "
+    "This is a hand-drawn sketch of one object that will be turned into a realistic 3D model. "
     "Name the object in one to three plain words, for example 'coffee mug', 'armchair' or 'sports car'. "
-    "In details, list at most 12 words about its visible shape only, for example 'tall tapered body, round "
-    "handle on the right'. In material, give one short phrase for a plausible real-world material and "
-    "finish for this object, for example 'white glazed ceramic', 'brushed steel' or 'soft grey plush "
-    "fabric'. Set confidence between 0 and 1."
+    "In details, list at most 12 words about the real object's shape and pose as the sketch shows it, for "
+    "example 'tall tapered body, round handle on the right'; describe the object, not the drawing style. "
+    "In material, give one short phrase for the real colours and surface it would plausibly have, for "
+    "example 'white glazed ceramic', 'brushed steel', 'soft grey plush fabric' or 'short tabby fur'. "
+    "In drawing, answer 'clean' if the lines already show the real object's true shape and proportions, or "
+    "'rough' if it is a quick, wobbly, childlike or cartoon-style doodle (odd proportions, a smiley face, "
+    "lumpy outlines) that the real object should not copy line for line. Set confidence between 0 and 1."
 )
 
 NAMING_SCHEMA = {
@@ -34,15 +37,16 @@ NAMING_SCHEMA = {
         "object": {"type": "string"},
         "details": {"type": "string"},
         "material": {"type": "string"},
+        "drawing": {"type": "string", "enum": ["clean", "rough"]},
         "confidence": {"type": "number"},
     },
-    "required": ["object", "details", "material", "confidence"],
+    "required": ["object", "details", "material", "drawing", "confidence"],
     "additionalProperties": False,
 }
 
 
 JSON_REPLY = (" Reply only with a JSON object with the keys object (string), details (string), "
-              "material (string) and confidence (number).")
+              "material (string), drawing ('clean' or 'rough') and confidence (number).")
 
 
 def parse_naming(text: str) -> dict | None:
@@ -61,8 +65,10 @@ def parse_naming(text: str) -> dict | None:
         confidence = float(data.get("confidence", 0.5))
     except (TypeError, ValueError):
         confidence = 0.5
+    drawing = str(data.get("drawing", "")).strip().lower()
     return {"label": name, "details": str(data.get("details", "")).strip(),
-            "material": str(data.get("material", "")).strip()[:60], "confidence": confidence}
+            "material": str(data.get("material", "")).strip()[:60],
+            "drawing": drawing if drawing in ("clean", "rough") else "", "confidence": confidence}
 
 
 def name_with_llm(image_path: Path, cfg) -> tuple[dict | None, str]:
@@ -193,13 +199,16 @@ def with_article(noun: str) -> str:
     return f"{'an' if noun[:1] in 'aeiou' else 'a'} {noun}"
 
 
-def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "") -> str:
+def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "",
+                 drawing: str = "") -> str:
     if user_prompt:                         # the user's words decide appearance; the LLM's material is not used
         subject = user_prompt
         if label and label not in user_prompt.lower():
             subject = f"{with_article(label)}, {user_prompt}"
     elif label:
         subject = with_article(label) + "".join(f", {part}" for part in (material, details) if part)
+        if drawing == "rough":              # a doodle: ask for the real thing, not a copy of the cartoon
+            subject += f", {cfg.generate.rough.prompt}"
     else:
         subject = "a single everyday object"
     return f"{subject}, {cfg.generate.prompt_suffix}"
@@ -209,10 +218,10 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
     named, note = name_with_llm(sketch.lineart_path, cfg)
     if note:
         store.warn(note)
-    material = ""
+    material, drawing = "", ""
     if named:
         label, details, confidence, source = named["label"], named["details"], named["confidence"], named["source"]
-        material = named.get("material", "")
+        material, drawing = named.get("material", ""), named.get("drawing", "")
     else:
         lineart = Image.open(sketch.lineart_path).convert("RGB")
         probs = clip_zero_shot(models, [lineart], OBJECTS, "a black and white sketch of {}")[0]
@@ -222,8 +231,11 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
             label, source = OBJECTS[best], "clip"
         else:
             label, source = None, "none"
+    negative_prompt = cfg.generate.negative_prompt
+    if drawing == "rough" and not user_prompt:
+        negative_prompt += f", {cfg.generate.rough.negative_prompt}"
     return Intent(
         label=label, confidence=round(confidence, 3), source=source,
-        prompt=build_prompt(label, details, user_prompt, cfg, material),
-        negative_prompt=cfg.generate.negative_prompt, details=details,
+        prompt=build_prompt(label, details, user_prompt, cfg, material, drawing),
+        negative_prompt=negative_prompt, details=details, drawing=drawing,
     )

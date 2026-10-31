@@ -43,6 +43,11 @@ generate:
   # "matte finish" and the reflection negatives keep glossy highlights from being baked into the texture
   prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, product photo, plain white background, soft even studio lighting, matte finish, high detail"
   negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid, flat, 2D, relief, embossed, engraved, plaque, cookie cutter, sticker, coin, badge, glossy, reflections, specular highlights"
+  rough:                      # the LLM naming call judged the sketch a quick or cartoon-style doodle (never without a key)
+    control_scale: 0.55       # first round only; if the fidelity gate rejects the image, retries follow the lines fully
+    control_end: 0.6          # the sketch guides the first 60% of the steps (layout, silhouette), then the model is free
+    prompt: "photorealistic, lifelike, realistic proportions"   # added when there is no typed description
+    negative_prompt: "cartoon, figurine"
 
 score:
   threshold: 0.35             # calibrate

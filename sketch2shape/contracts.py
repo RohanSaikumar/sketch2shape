@@ -22,6 +22,7 @@ class Intent:
     prompt: str
     negative_prompt: str
     details: str = ""
+    drawing: str = ""       # "clean" or "rough" (the LLM's judgement of the sketch); "" when unknown
 
 
 @dataclass
