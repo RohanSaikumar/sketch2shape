@@ -1,9 +1,11 @@
 """Gradio app: draw or upload a sketch, add an optional description, get a textured 3D model.
 
-While a model is being made, the page shows what is happening right now: a progress bar weighted by
-how long each step takes, the current step with its elapsed and usual time, a checklist of finished
-steps, and each intermediate result as soon as it exists (cleaned sketch, candidate images with
-scores, cut-out, then the untextured 3D shape, which can be rotated while the texture is painted).
+While a model is being made, a progress panel pinned to the top of the page shows what is happening
+right now: a bar weighted by how long each step takes, the current step with its elapsed and usual
+time, and the finished steps. Each intermediate result appears as soon as it exists (cleaned sketch,
+candidate image with its score, cut-out, then the untextured 3D shape, which can be rotated while the
+texture is painted). The button is disabled while a model is being made, and only one model is made
+at a time, even if the page is reloaded mid-run.
 
 Run:  python app.py            (local)
       python app.py --share    (public gradio.live link, e.g. from a Kaggle notebook)
@@ -11,6 +13,8 @@ Run:  python app.py            (local)
 from __future__ import annotations
 
 import argparse
+import html
+import inspect
 import queue
 import threading
 import time
@@ -21,6 +25,9 @@ from PIL import Image
 
 from sketch2shape import Sketch2Shape, load_config
 from sketch2shape.models import relaunch_with_lean_malloc, stop_leftover_workers
+
+ROOT = Path(__file__).resolve().parent
+EXAMPLES = sorted((ROOT / "examples" / "sketches").glob("*.png"))
 
 # step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end)
 STEPS = {
@@ -35,6 +42,44 @@ STEPS = {
     "check_texture": ("Checking the texture", 5, 0.95, 0.97),
     "export": ("Saving the GLB and OBJ files", 5, 0.97, 1.00),
 }
+
+# Keeps the progress panel in view while the page scrolls. Older Gradio takes css in Blocks(), 6.x in launch().
+CSS = """
+.gradio-container { overflow: visible !important; }  /* 'hidden' here disables sticky positioning */
+#s2s-status { position: sticky; top: 0; z-index: 100; background: var(--background-fill-primary); padding-bottom: 6px; }
+"""
+BLOCKS_TAKES_CSS = "css" in inspect.signature(gr.Blocks.__init__).parameters
+
+# Only one model is made at a time. Gradio's queue enforces that per request, but a page reload cancels the
+# request while the pipeline thread keeps running; this guard stops a second run from starting beside it.
+BUSY = {"thread": None, "started": 0.0, "run": ""}
+BUSY_LOCK = threading.Lock()
+
+
+# ------------------------------------------------------------------ pieces of the page
+
+def panel(fraction: float, title: str, detail: str = "", done: list[str] | None = None,
+          state: str = "running") -> str:
+    """The progress panel: title, percentage, bar, one detail line and the finished steps."""
+    pct = max(0, min(100, int(round(fraction * 100))))
+    colour = {"running": "var(--color-accent)", "done": "#2e9e5b", "error": "#d64545",
+              "idle": "var(--neutral-400)"}[state]
+    steps = "".join(f"<div>&#10003; {html.escape(line)}</div>" for line in (done or []))
+    return (
+        '<div style="padding:10px 14px;border:1px solid var(--border-color-primary);border-radius:10px;'
+        'background:var(--background-fill-secondary)">'
+        '<div style="display:flex;justify-content:space-between;gap:12px;font-weight:600;margin-bottom:6px">'
+        f'<span>{html.escape(title)}</span><span>{pct}%</span></div>'
+        '<div style="height:12px;border-radius:6px;background:var(--neutral-200);overflow:hidden">'
+        f'<div style="height:100%;width:{pct}%;background:{colour};transition:width .8s ease"></div></div>'
+        f'<div style="margin-top:6px;font-size:.93em">{detail}</div>'
+        f'<div style="margin-top:4px;font-size:.85em;opacity:.8;columns:2 260px">{steps}</div>'
+        '</div>'
+    )
+
+
+IDLE = panel(0.0, "Ready", "Draw a sketch or upload one, optionally describe it, then click "
+             "<b>Make 3D model</b>. A model takes about 5-6 minutes on Kaggle's free T4 GPUs.", state="idle")
 
 
 def thumbnail(path: Path, size: int = 384) -> str | None:
@@ -85,33 +130,72 @@ def run_summary(manifest: dict) -> dict:
     }
 
 
-def status_text(done: list[str], current: tuple[str, float] | None, total_s: float) -> str:
-    lines = [f"**Elapsed: {int(total_s) // 60}:{int(total_s) % 60:02d}**"]
-    if current:
-        label, usual = STEPS[current[0]][:2]
-        lines.append(f"Now: {label}: {int(time.monotonic() - current[1])} s (usually about {usual} s)")
-    lines += [f"- done: {line}" for line in done]
-    return "\n\n".join(lines[:2]) + ("\n\n" + "\n".join(lines[2:]) if len(lines) > 2 else "")
+def has_strokes(canvas) -> bool:
+    """True if the sketchpad holds anything drawn (any dark pixel once flattened onto white)."""
+    image = canvas.get("composite") if isinstance(canvas, dict) else canvas
+    if image is None:
+        return False
+    try:
+        rgba = image.convert("RGBA") if isinstance(image, Image.Image) else Image.fromarray(image).convert("RGBA")
+        flat = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba).convert("L")
+        return flat.getextrema()[0] < 200
+    except Exception:
+        return True                         # unknown format: let preprocessing decide
 
+
+def blank_canvas() -> dict:
+    """A white drawing surface; some Gradio versions otherwise show a black, transparent canvas."""
+    return {"background": Image.new("RGB", (800, 800), "white"), "layers": [], "composite": None}
+
+
+def pick_input(mode: str, canvas, upload):
+    """The open tab decides which input is used; if that one is empty, fall back to the other."""
+    if mode == "upload":
+        return (upload, "upload") if upload is not None else (canvas, "canvas")
+    if has_strokes(canvas) or upload is None:
+        return canvas, "canvas"
+    return upload, "upload"
+
+
+def elapsed_text(seconds: float) -> str:
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+# ------------------------------------------------------------------ the button handler
 
 def model_maker(pipeline: Sketch2Shape):
-    """The button handler: runs the pipeline in a thread and streams progress and partial results."""
-    def make_model(canvas, upload, prompt, progress=gr.Progress()):
-        image, source = (upload, "upload") if upload is not None else (canvas, "canvas")
-        ctx = pipeline.new_context(image, prompt or "", source)
-        run_dir = Path(ctx.store.dir)
-        events: queue.Queue = queue.Queue()
-        holder = {}
+    """Runs the pipeline in a thread and streams progress and partial results to the page."""
+    def make_model(canvas, upload, prompt, mode="canvas"):
+        skip = gr.update()
+        with BUSY_LOCK:
+            running = BUSY["thread"]
+            if running is not None and running.is_alive():
+                yield (skip, skip, skip, skip,
+                       panel(0.0, "Already making a model",
+                             f"A model started {elapsed_text(time.monotonic() - BUSY['started'])} ago "
+                             f"(run {html.escape(BUSY['run'])}) is still being made. Try again when it "
+                             "finishes; only one model is made at a time.", state="error"))
+                return
+            image, source = pick_input(mode, canvas, upload)
+            ctx = pipeline.new_context(image, prompt or "", source)
+            run_dir = Path(ctx.store.dir)
+            events: queue.Queue = queue.Queue()
+            holder = {}
 
-        def work():
-            holder["result"] = pipeline.finish(ctx, pipeline.drive(ctx, lambda *e: events.put(e)))
+            def work():
+                holder["result"] = pipeline.finish(ctx, pipeline.drive(ctx, lambda *e: events.put(e)))
 
-        worker = threading.Thread(target=work, daemon=True)
-        worker.start()
+            worker = threading.Thread(target=work, daemon=True)
+            BUSY.update(thread=worker, started=time.monotonic(), run=run_dir.name)
+            worker.start()
+
         started = time.monotonic()
+        used = "your drawing" if source == "canvas" else "the uploaded image"
+        # clear the previous model's results as the new run starts
+        yield (gr.update(value=None, label="3D model (drag to rotate)"), None, [], None,
+               panel(0.0, "Starting", f"Using {used}."))
         done, current, fraction = [], None, 0.0
         shown_items, shown_shape = 0, None
-        skip = gr.update()
 
         while worker.is_alive() or not events.empty():
             changed = False
@@ -127,11 +211,13 @@ def model_maker(pipeline: Sketch2Shape):
                 changed = True
             except queue.Empty:
                 pass
+            title, detail = "Working", f"Elapsed {elapsed_text(time.monotonic() - started)}"
             if current:
                 label, usual, low, high = STEPS[current[0]]
-                within = min(0.95, (time.monotonic() - current[1]) / usual)
-                fraction = max(fraction, low + (high - low) * within)
-                progress(fraction, desc=f"{label}: {int(time.monotonic() - current[1])} s of about {usual} s")
+                spent = time.monotonic() - current[1]
+                fraction = max(fraction, low + (high - low) * min(0.95, spent / usual))
+                title = label
+                detail = f"{int(spent)} s of about {usual} s &middot; elapsed {elapsed_text(time.monotonic() - started)}"
 
             try:                            # the live view must never stop the run
                 items = gallery_items(run_dir, ctx.store.manifest)
@@ -144,50 +230,65 @@ def model_maker(pipeline: Sketch2Shape):
             if shapes and shapes[-1] != shown_shape:
                 shown_shape = shapes[-1]
                 viewer_update = gr.update(value=str(shown_shape), label="3D shape (texture still in progress)")
-            yield (viewer_update, skip, gallery_update, skip,
-                   status_text(done, current, time.monotonic() - started))
+            yield viewer_update, skip, gallery_update, skip, panel(fraction, title, detail, done)
 
         result = holder.get("result")
         if result is None:
-            yield (skip, skip, skip, skip, f"**Something went wrong.** See runs/{run_dir.name}/manifest.json.")
+            yield (skip, skip, skip, skip, panel(fraction, "Something went wrong",
+                   f"See runs/{html.escape(run_dir.name)}/manifest.json.", done, state="error"))
             return
         files = [str(p) for p in (result.glb_path, result.obj_zip_path) if p]
-        status = ("**Done.** " if result.ok else "**Could not make a model.** ") + result.message
         warnings = result.manifest.get("warnings") or []
-        if result.ok and warnings:
-            status += "\n\nNotes: " + " ".join(warnings[:3])
-        status += "\n\n" + "\n".join(f"- done: {line}" for line in done)
+        if result.ok:
+            detail = (f"{html.escape(result.message)} Download the model below, or drag the viewer to rotate it."
+                      + (f"<br><i>Notes:</i> {html.escape(' '.join(warnings[:3]))}" if warnings else ""))
+            final = panel(1.0, "Done", detail, done, state="done")
+        else:
+            final = panel(fraction, "Could not make a model", html.escape(result.message), done, state="error")
         viewer = gr.update(value=str(result.glb_path), label="3D model (drag to rotate)") if result.glb_path else skip
-        yield (viewer, files or None, gallery_items(run_dir, result.manifest), run_summary(result.manifest), status)
+        yield viewer, files or None, gallery_items(run_dir, result.manifest), run_summary(result.manifest), final
 
     return make_model
 
 
+# ------------------------------------------------------------------ the page
+
 def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
     make_model = model_maker(pipeline)
-    with gr.Blocks(title="Sketch2Shape") as demo:
+    blocks_args = {"css": CSS} if BLOCKS_TAKES_CSS else {}
+    with gr.Blocks(title="Sketch2Shape", **blocks_args) as demo:
         gr.Markdown("# Sketch2Shape\nDraw a sketch or upload one, optionally describe it, and get a textured "
-                    "3D model you can download as .glb or .obj. On Kaggle's free T4 GPUs a model takes "
-                    "about 5-7 minutes; each step and its result appear below as soon as they are ready.")
+                    "3D model you can download as .glb or .obj.")
+        status = gr.HTML(IDLE, elem_id="s2s-status")
+        mode = gr.State("canvas")
         with gr.Row():
             with gr.Column():
-                with gr.Tab("Draw"):
-                    canvas = gr.Sketchpad(label="Sketch (brush, eraser, undo and clear are in the toolbar)",
-                                          type="pil",
+                with gr.Tab("Draw") as draw_tab:
+                    canvas = gr.Sketchpad(value=blank_canvas(), type="pil",
+                                          label="Sketch (brush, eraser, undo and clear are in the toolbar)",
                                           brush=gr.Brush(colors=["#000000"], color_mode="fixed", default_size=4))
-                with gr.Tab("Upload"):
-                    upload = gr.Image(label="Sketch image (clear it to use the drawing instead)", type="pil")
+                with gr.Tab("Upload") as upload_tab:
+                    upload = gr.Image(label="Sketch image (photo, scan or drawing)", type="pil")
+                    if EXAMPLES:
+                        gr.Examples(examples=[[str(p)] for p in EXAMPLES], inputs=[upload],
+                                    label="Or pick an example sketch")
                 prompt = gr.Textbox(label="Description (optional)",
-                                    placeholder="e.g. a matte red ceramic mug, or a wooden chair")
+                                    placeholder="e.g. a matte red ceramic mug, or a wooden chair. "
+                                                "Leave empty to let the app decide.")
                 button = gr.Button("Make 3D model", variant="primary")
-                status = gr.Markdown()
             with gr.Column():
                 viewer = gr.Model3D(label="3D model (drag to rotate)", clear_color=(1, 1, 1, 1), height=440)
                 files = gr.File(label="Downloads", file_count="multiple")
         gallery = gr.Gallery(label="Steps so far", columns=5, height=240)
         with gr.Accordion("Run details", open=False):
             details = gr.JSON(label="Run summary")
-        button.click(make_model, [canvas, upload, prompt], [viewer, files, gallery, details, status])
+
+        draw_tab.select(lambda: "canvas", None, mode)
+        upload_tab.select(lambda: "upload", None, mode)
+        (button.click(lambda: gr.update(interactive=False, value="Working... please wait"), None, button, queue=False)
+               .then(make_model, [canvas, upload, prompt, mode], [viewer, files, gallery, details, status],
+                     show_progress="hidden")
+               .then(lambda: gr.update(interactive=True, value="Make 3D model"), None, button, queue=False))
     return demo
 
 
@@ -203,8 +304,10 @@ def main() -> None:
     runs = Path(cfg.runs_dir).resolve()
     runs.mkdir(parents=True, exist_ok=True)
     demo = build_app(Sketch2Shape(cfg))
+    launch_args = {} if BLOCKS_TAKES_CSS else {"css": CSS}
     demo.queue(default_concurrency_limit=1).launch(share=args.share, server_port=args.port,
-                                                   allowed_paths=[str(runs)])
+                                                   allowed_paths=[str(runs), str(ROOT / "examples")],
+                                                   **launch_args)
 
 
 if __name__ == "__main__":
