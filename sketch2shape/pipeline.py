@@ -17,7 +17,7 @@ from typing import Callable
 
 from .config import load_config
 from .contracts import Candidate, ExportBundle, Intent, PreparedImage, SketchAsset
-from .models import ModelManager
+from .models import ModelManager, rss_gb
 from .runstore import RunStore
 from .stages.export import export_mesh
 from .stages.generate import generate
@@ -185,7 +185,8 @@ class Sketch2Shape:
             ctx.store.add_time(state.value, seconds)
             nxt = TRANSITIONS.get((state, outcome)) or self._recover(ctx, state)
             ctx.store.manifest["transitions"].append(
-                {"state": state.value, "outcome": outcome, "next": nxt.value, "seconds": round(seconds, 2)})
+                {"state": state.value, "outcome": outcome, "next": nxt.value, "seconds": round(seconds, 2),
+                 "main_rss_gb": rss_gb()})
             if on_event:
                 on_event(state.value, outcome, ctx.elapsed())
             state = nxt

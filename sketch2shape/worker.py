@@ -137,6 +137,11 @@ def main(argv=None) -> int:
     job = json.loads(Path(job_path).read_text(encoding="utf-8"))
     try:
         result = {"ok": True, **TASKS[job["task"]](job)}
+        try:
+            import resource                         # peak CPU RAM of this worker (Linux reports KB)
+            result["max_rss_gb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2)
+        except ImportError:
+            pass
     except Exception as exc:
         result = {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()[-3000:]}
         print(result["traceback"], file=sys.stderr, flush=True)

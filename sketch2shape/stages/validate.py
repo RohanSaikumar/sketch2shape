@@ -39,13 +39,27 @@ def is_textured(mesh) -> bool:
     return image is not None and float(np.asarray(image.convert("RGB")).std()) > 2.0
 
 
-def part_shares(mesh: trimesh.Trimesh) -> list[float]:
+def components(mesh: trimesh.Trimesh) -> tuple[list[np.ndarray], np.ndarray]:
+    """Connected pieces as lists of face indices, plus each face's area.
+
+    Works on bare geometry with vertices merged by position: a textured mesh duplicates vertices along
+    its UV seams, so splitting it directly reports hundreds of pieces that are really one surface, and
+    trimesh copies the texture image into every piece (this filled 22 GB of RAM on Kaggle).
+    Face order is unchanged, so the indices also apply to the original mesh.
+    """
+    geometry = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces), process=True)
+    areas = geometry.area_faces
     try:
-        parts = mesh.split(only_watertight=False)
-    except Exception:                   # graph library missing: treat as one part
-        return [1.0]
-    areas = np.array([p.area for p in parts], dtype=float)
-    return list(areas / areas.sum()) if len(areas) and areas.sum() > 0 else [1.0]
+        groups = trimesh.graph.connected_components(geometry.face_adjacency, nodes=np.arange(len(geometry.faces)))
+    except Exception:                   # graph library missing: treat as one piece
+        groups = [np.arange(len(geometry.faces))]
+    return [np.asarray(g) for g in groups], areas
+
+
+def part_shares(mesh: trimesh.Trimesh) -> list[float]:
+    groups, areas = components(mesh)
+    total = float(areas.sum())
+    return [float(areas[g].sum()) / total for g in groups] if total > 0 else [1.0]
 
 
 def check_mesh(mesh, cfg, expect_texture: bool = False) -> MeshReport:
@@ -77,13 +91,13 @@ def check_mesh(mesh, cfg, expect_texture: bool = False) -> MeshReport:
 
 
 def drop_fragments(mesh, min_share: float) -> trimesh.Trimesh:
+    """Remove pieces smaller than min_share of the surface, keeping the mesh's own visuals."""
     mesh = as_trimesh(mesh)
-    try:
-        parts = mesh.split(only_watertight=False)
-    except Exception:
+    groups, areas = components(mesh)
+    if len(groups) < 2:
         return mesh
-    if len(parts) < 2:
+    total = float(areas.sum())
+    kept = [g for g in groups if areas[g].sum() >= min_share * total] or [max(groups, key=lambda g: areas[g].sum())]
+    if len(kept) == len(groups):
         return mesh
-    total = sum(p.area for p in parts)
-    kept = [p for p in parts if p.area >= min_share * total] or [max(parts, key=lambda p: p.area)]
-    return trimesh.util.concatenate(kept)
+    return mesh.submesh([np.concatenate(kept)], append=True)

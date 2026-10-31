@@ -45,19 +45,24 @@ class ModelManager:
         log_path = store.path(f"worker_{tag}.log")
         job_path.write_text(json.dumps({"task": task, **job}, default=str), encoding="utf-8")
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu_index(role)), PYTHONUNBUFFERED="1")
-        try:
-            with open(log_path, "w", encoding="utf-8") as log:
-                subprocess.run([sys.executable, "-m", "sketch2shape.worker", str(job_path), str(result_path)],
-                               env=env, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT,
-                               timeout=float(self.cfg.worker_timeout_s))
-        except subprocess.TimeoutExpired:
-            raise WorkerError(f"{task} worker timed out after {self.cfg.worker_timeout_s} s (log: {log_path})")
+        with open(log_path, "w", encoding="utf-8") as log:
+            # own process group, so anything the worker starts is cleaned up with it
+            proc = subprocess.Popen([sys.executable, "-m", "sketch2shape.worker", str(job_path), str(result_path)],
+                                    env=env, cwd=PROJECT_ROOT, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            try:
+                proc.wait(timeout=float(self.cfg.worker_timeout_s))
+            except subprocess.TimeoutExpired:
+                raise WorkerError(f"{task} worker timed out after {self.cfg.worker_timeout_s} s (log: {log_path})")
+            finally:
+                kill_group(proc)
         result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else None
         if not result or not result.get("ok"):
+            killed = " (killed: probably out of CPU RAM)" if proc.returncode == -9 else ""
             detail = (result or {}).get("error") or tail(log_path)
-            raise WorkerError(f"{task} worker failed: {detail} (log: {log_path})")
+            raise WorkerError(f"{task} worker failed{killed}: {detail} (log: {log_path})")
         store.manifest.setdefault("workers", []).append(
-            {"task": task, **{k: result[k] for k in ("load_s", "run_s", "peak_gb") if k in result}})
+            {"task": task, **{k: result[k] for k in ("load_s", "run_s", "peak_gb", "max_rss_gb") if k in result}})
         return result
 
     # ------------------------------------------------- small models on CPU
@@ -77,6 +82,29 @@ class ModelManager:
 
     def free_memory(self) -> None:
         gc.collect()
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """Stop the worker and anything it started (Linux; elsewhere just the worker)."""
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def rss_gb() -> float | None:
+    """This process's resident memory in GB (Linux), for the run log."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return round(int(line.split()[1]) / 2**20, 2)
+    except OSError:
+        pass
+    return None
 
 
 def tail(path: Path, lines: int = 15) -> str:

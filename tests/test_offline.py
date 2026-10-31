@@ -130,6 +130,20 @@ def textured_sphere():
     return sphere
 
 
+def test_uv_seams_are_not_counted_as_fragments(cfg):
+    """A textured mesh duplicates vertices along UV seams; it is still one piece (this once failed every texture)."""
+    sphere = textured_sphere()
+    seams = trimesh.Trimesh(vertices=sphere.vertices[sphere.faces].reshape(-1, 3),
+                            faces=np.arange(len(sphere.faces) * 3).reshape(-1, 3), process=False)
+    seams.visual = trimesh.visual.TextureVisuals(uv=((seams.vertices[:, :2] + 1) / 2),
+                                                 image=sphere.visual.material.image)
+    assert len(seams.split(only_watertight=False)) > 100        # naive splitting sees every face as a piece
+    report = check_mesh(seams, cfg, expect_texture=True)
+    assert report.ok, report.problems
+    assert report.checks["parts"] == 1
+    assert drop_fragments(seams, 0.02) is not None
+
+
 def test_project_colours_follows_the_image(tmp_path):
     sphere = trimesh.creation.icosphere(subdivisions=3)
     rgba = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
@@ -205,8 +219,8 @@ def test_state_machine_exports_best_mesh_after_an_unexpected_error(cfg):
     })
     ctx = pipe.new_context(image=None)
     assert pipe.drive(ctx) == State.DONE
-    assert ctx.store.manifest["transitions"][-2] == {"state": "texture", "outcome": "error",
-                                                     "next": "export", "seconds": ctx.store.manifest["transitions"][-2]["seconds"]}
+    step = ctx.store.manifest["transitions"][-2]
+    assert (step["state"], step["outcome"], step["next"]) == ("texture", "error", "export")
 
 
 def test_worker_process_round_trip(cfg, store):
