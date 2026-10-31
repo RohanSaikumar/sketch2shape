@@ -91,6 +91,17 @@ IDLE = panel(0.0, "Ready", "Draw a sketch or upload one, optionally describe it,
              "(the first one after the app starts a little longer).", state="idle")
 
 
+def models_line(pipeline: Sketch2Shape) -> tuple[str, bool]:
+    """The model status line under the progress panel, and whether it is still changing (SDXL loading)."""
+    status = getattr(pipeline.models, "sdxl_status", None)
+    if status is None:
+        return "", False
+    state, text = status()
+    colour = {"loading": "#d98e04", "ready": "#2e9e5b", "off": "var(--neutral-400)", "failed": "#d64545"}[state]
+    return (f'<div style="font-size:.88em;padding:0 14px"><span style="color:{colour}">&#9679;</span> '
+            f'{html.escape(text)}</div>'), state == "loading"
+
+
 def thumbnail(path: Path, size: int = 384) -> str | None:
     """A small JPEG of an intermediate image (~25 KB instead of ~1 MB), so the live view works on slow links.
     Returns None if the image cannot be read yet (e.g. still being written); the next refresh retries."""
@@ -312,6 +323,8 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
         gr.Markdown("# Sketch2Shape\nDraw a sketch or upload one, optionally describe it, and get a textured "
                     "3D model you can download as .glb or .obj.")
         status = gr.HTML(IDLE, elem_id="s2s-status")
+        loaded = gr.HTML(models_line(pipeline)[0])
+        timer = gr.Timer(2.0)                   # refreshes the line while SDXL loads, then stops
         mode = gr.State("canvas")
         with gr.Row():
             with gr.Column():
@@ -354,6 +367,10 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
             pipeline.cancel(ctx)
             return gr.update(interactive=False, value="Cancelling...")
 
+        def refresh_models_line():
+            line, changing = models_line(pipeline)
+            return line, gr.Timer(active=changing)
+
         def idle_buttons():                 # Cancel stays usable if another tab's run is still going
             return (gr.update(interactive=True, value="Make 3D model"),
                     gr.update(interactive=run_in_progress(), value="Cancel"))
@@ -365,9 +382,12 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                .then(make_model, [canvas, upload, prompt, mode], [viewer, files, gallery, details, status],
                      show_progress="hidden")
                .then(idle_buttons, None, [button, stop], queue=False)
-               .then(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False))
+               .then(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False)
+               .then(refresh_models_line, None, [loaded, timer], queue=False))
         stop.click(cancel_run, None, stop, queue=False)
+        timer.tick(refresh_models_line, None, [loaded, timer], queue=False)
         demo.load(lambda: gr.update(interactive=run_in_progress()), None, stop, queue=False)
+        demo.load(refresh_models_line, None, [loaded, timer], queue=False)
         refresh.click(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False)
         history.change(lambda name: show_past_run(runs_dir, name), history, [old_viewer, old_files, old_gallery],
                        queue=False)

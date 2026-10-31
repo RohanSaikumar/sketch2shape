@@ -45,7 +45,7 @@ class ServingWorker:
 
     def __init__(self, task: str, gpu: int, load: dict, folder: Path):
         tag = f"{task}_{uuid.uuid4().hex[:6]}"
-        self.task, self.load, self.jobs = task, load, 0
+        self.task, self.load, self.jobs, self.started = task, load, 0, time.monotonic()
         self.ready_path = Path(folder) / f"serve_{tag}_ready.json"
         self.log_path = Path(folder) / f"serve_{tag}.log"
         self.cancel_path: Path | None = None
@@ -284,6 +284,22 @@ class ModelManager:
         if "generate" in self.cfg.workers.keep_loaded and self.separate_gpus():
             self._kept_worker("generate", "sdxl", model_job(self.cfg))
         threading.Thread(target=self._warm_small_models, daemon=True).start()
+
+    def sdxl_status(self) -> tuple[str, str]:
+        """("loading" | "ready" | "off" | "failed", one line of text) for the app's model status line."""
+        if "generate" not in self.cfg.workers.keep_loaded or not self.separate_gpus():
+            return "off", "SDXL loads at the start of each run (it is kept loaded only with two GPUs)."
+        with self._lock:
+            kept = self._kept.get("generate")
+        if kept is None:
+            return "off", "SDXL loads on the first run."
+        if not kept.alive():
+            return "failed", f"The SDXL worker stopped; the next run loads it again (log: runs/_workers/{kept.log_path.name})."
+        if kept.loading():
+            return "loading", (f"Loading SDXL... {int(time.monotonic() - kept.started)} s (usually about a minute). "
+                               "You can start a run now; it waits for SDXL.")
+        small = "CLIP and background removal ready" if self._clip and self._bg else "CLIP still loading"
+        return "ready", f"SDXL ready (loaded in {kept.load_s() or 0:.0f} s) · {small}."
 
     def _warm_small_models(self) -> None:
         from PIL import Image
