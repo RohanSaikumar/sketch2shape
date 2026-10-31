@@ -22,6 +22,15 @@ def _peak_gb() -> float:
     return round(torch.cuda.max_memory_reserved() / 2**30, 2) if torch.cuda.is_available() else 0.0
 
 
+def save_atomically(target, write) -> None:
+    """Write via a temporary name in the same folder, then rename, so the app never reads half a file.
+    `write` receives the temporary path, which keeps the target's extension (trimesh/PIL pick the format from it)."""
+    target = Path(target)
+    temporary = target.with_name(f"tmp_{target.name}")
+    write(temporary)
+    temporary.replace(target)
+
+
 def task_ping(job: dict) -> dict:
     return {"python": platform.python_version()}
 
@@ -65,7 +74,7 @@ def task_generate(job: dict) -> dict:
     paths = []
     for index, image in enumerate(images):
         path = Path(job["out_dir"]) / f"{job['name_prefix']}{index}.png"
-        image.save(path)
+        save_atomically(path, image.save)
         paths.append(str(path))
     return {"paths": paths, "n": n, "load_s": round(load_s, 1),
             "run_s": round(time.time() - started, 1), "peak_gb": _peak_gb()}
@@ -96,7 +105,7 @@ def task_shape(job: dict) -> dict:
                 generator=torch.manual_seed(int(job["seed"])))[0]
     for step in (FloaterRemover(), DegenerateFaceRemover(), FaceReducer()):
         mesh = step(mesh)
-    mesh.export(job["out"])
+    save_atomically(job["out"], mesh.export)
     return {"variant": variant, "steps": steps, "faces": int(len(mesh.faces)), "load_s": round(load_s, 1),
             "run_s": round(time.time() - started, 1), "peak_gb": _peak_gb()}
 
@@ -124,7 +133,7 @@ def task_paint(job: dict) -> dict:
         pipe.enable_model_cpu_offload()
         textured = pipe(trimesh.load(job["mesh"], force="mesh"), image=image)
         mode = "hunyuan paint (CPU offload)"
-    textured.export(job["out"])
+    save_atomically(job["out"], textured.export)
     return {"mode": mode, "load_s": round(load_s, 1), "run_s": round(time.time() - started, 1),
             "peak_gb": _peak_gb()}
 

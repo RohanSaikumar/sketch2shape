@@ -37,12 +37,16 @@ STEPS = {
 }
 
 
-def thumbnail(path: Path, size: int = 384) -> str:
-    """A small JPEG of an intermediate image (~25 KB instead of ~1 MB), so the live view works on slow links."""
+def thumbnail(path: Path, size: int = 384) -> str | None:
+    """A small JPEG of an intermediate image (~25 KB instead of ~1 MB), so the live view works on slow links.
+    Returns None if the image cannot be read yet (e.g. still being written); the next refresh retries."""
     target = path.parent / "thumbs" / (path.stem + ".jpg")
     if not target.exists():
+        try:
+            image = Image.open(path).convert("RGBA")
+        except (OSError, SyntaxError, ValueError):
+            return None
         target.parent.mkdir(exist_ok=True)
-        image = Image.open(path).convert("RGBA")
         flat = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image).convert("RGB")
         flat.thumbnail((size, size))
         flat.save(target, quality=82)
@@ -50,18 +54,19 @@ def thumbnail(path: Path, size: int = 384) -> str:
 
 
 def gallery_items(run_dir: Path, manifest: dict) -> list[tuple[str, str]]:
-    items = []
+    found = []
     if (run_dir / "02_lineart.png").exists():
-        items.append((thumbnail(run_dir / "02_lineart.png"), "cleaned sketch"))
+        found.append((run_dir / "02_lineart.png", "cleaned sketch"))
     scored = {c["path"]: c for c in manifest.get("candidates", [])}
     chosen = manifest.get("chosen_candidate")
     for path in sorted(run_dir.glob("05_candidate_r*_[0-9].png")):
         c = scored.get(path.name)
         label = "scoring..." if c is None else f"score {c['total']:.2f}" + ("  (chosen)" if path.name == chosen else "")
-        items.append((thumbnail(path), label))
+        found.append((path, label))
     if (run_dir / "06_prepared.png").exists():
-        items.append((thumbnail(run_dir / "06_prepared.png"), "input to 3D"))
-    return items
+        found.append((run_dir / "06_prepared.png", "input to 3D"))
+    items = [(thumbnail(path), label) for path, label in found]
+    return [(thumb, label) for thumb, label in items if thumb]
 
 
 def run_summary(manifest: dict) -> dict:
@@ -128,9 +133,12 @@ def model_maker(pipeline: Sketch2Shape):
                 fraction = max(fraction, low + (high - low) * within)
                 progress(fraction, desc=f"{label}: {int(time.monotonic() - current[1])} s of about {usual} s")
 
-            items = gallery_items(run_dir, ctx.store.manifest)
-            gallery_update = items if (changed or len(items) != shown_items) else skip
-            shown_items = len(items)
+            try:                            # the live view must never stop the run
+                items = gallery_items(run_dir, ctx.store.manifest)
+                gallery_update = items if (changed or len(items) != shown_items) else skip
+                shown_items = len(items)
+            except Exception:
+                gallery_update = skip
             shapes = sorted(run_dir.glob("07_shape_seed*.glb"))
             viewer_update = skip
             if shapes and shapes[-1] != shown_shape:
