@@ -8,6 +8,11 @@ gpus:                         # each heavy step runs in its own worker process o
   sdxl: 0                     # SDXL + ControlNet: 13.4 GB peak for 2 images
   hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB), then texture (12.8 GB); 0 also works on a single GPU
 
+workers:                      # only with two GPUs; on one GPU every step loads its model in a fresh worker
+  keep_loaded: [generate]     # SDXL stays loaded between runs (~1 min less per run after the first)
+  load_shape_early: true      # the shape model loads on GPU 1 while the image is made (~1 min less per run)
+  min_free_ram_gb: 16         # a model loads early only with this much RAM free (each Hunyuan load peaks ~15 GB)
+
 preprocess:
   size: 1024
   pad_ratio: 0.12

@@ -8,6 +8,8 @@ result so far instead of returning nothing.
 from __future__ import annotations
 
 import platform
+import subprocess
+import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -23,7 +25,7 @@ from .stages.export import export_mesh
 from .stages.generate import generate
 from .stages.prepare import prepare
 from .stages.preprocess import EmptySketchError, preprocess
-from .stages.reconstruct import make_shape, paint_mesh, project_colours
+from .stages.reconstruct import make_shape, paint_mesh, project_colours, shape_model_job
 from .stages.score import score_candidates
 from .stages.understand import understand
 from .stages.validate import check_mesh, drop_fragments
@@ -95,6 +97,11 @@ class RunContext:
     texture_mode: str = "none"
     bundle: ExportBundle | None = None
     message: str = ""
+    cancel: threading.Event = field(default_factory=threading.Event)   # set by Sketch2Shape.cancel()
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel.is_set()
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started
@@ -136,6 +143,7 @@ class Sketch2Shape:
     # ------------------------------------------------------------------ driver
 
     def new_context(self, image, prompt: str = "", source: str = "upload") -> RunContext:
+        self._models_call("new_run")
         store = RunStore(self.cfg.runs_dir)
         ctx = RunContext(
             store=store, image=image, prompt=(prompt or "").strip(), source=source,
@@ -153,15 +161,28 @@ class Sketch2Shape:
         ctx = self.new_context(image, prompt, source)
         return self.finish(ctx, self.drive(ctx, on_event))
 
+    def cancel(self, ctx: RunContext) -> None:
+        """Stop a run as soon as possible; called from another thread (the app's Cancel button). GPU work
+        stops at once; a step running on the CPU finishes first, then the run ends without exporting."""
+        ctx.cancel.set()
+        self._models_call("cancel")
+
+    def _models_call(self, name: str) -> None:
+        """Call an optional ModelManager hook (test doubles may not have it)."""
+        hook = getattr(self.models, name, None)
+        if hook is not None:
+            hook()
+
     def finish(self, ctx: RunContext, final: State) -> RunResult:
         """Record the outcome in manifest.json and build the result."""
+        self._models_call("end_run")        # stop workers loaded early for steps this run never reached
         ok = final == State.DONE
         if ok and not ctx.message:
             ctx.message = f"Done in {ctx.elapsed():.0f} s."
         ctx.store.set("result", {
             "ok": ok, "message": ctx.message, "total_s": round(ctx.elapsed(), 1),
             "texture_mode": ctx.texture_mode, "generation_rounds": ctx.rounds + 1 if ctx.candidates else 0,
-            "shape_attempts": ctx.shape_attempts,
+            "shape_attempts": ctx.shape_attempts, "cancelled": ctx.cancelled,
         })
         ctx.store.write()
         return RunResult(
@@ -173,11 +194,16 @@ class Sketch2Shape:
 
     def drive(self, ctx: RunContext, on_event: EventCallback | None = None, max_steps: int = 40) -> State:
         """Run the state machine. on_event(state, outcome, elapsed) is called with outcome "start" when a
-        step begins and with its outcome when it ends, so a UI can show what is happening right now."""
+        step begins and with its outcome when it ends, so a UI can show what is happening right now.
+        A cancelled run ends after the current step with the outcome "cancelled", without exporting."""
         state = State.PREPROCESS
+        ctx.store.set("setup_s", round(ctx.elapsed(), 2))     # time before the first step
         for _ in range(max_steps):
             if state in TERMINAL:
                 return state
+            if ctx.cancelled:
+                ctx.message = "Cancelled."
+                return State.FAILED
             if on_event:
                 on_event(state.value, "start", ctx.elapsed())
             started = time.monotonic()
@@ -190,11 +216,16 @@ class Sketch2Shape:
                     {"state": state.value, "traceback": traceback.format_exc()[-3000:]})
             seconds = time.monotonic() - started
             free_memory()                   # keep the main process small for the next GPU worker
+            cleanup_s = time.monotonic() - started - seconds
             ctx.store.add_time(state.value, seconds)
-            nxt = TRANSITIONS.get((state, outcome)) or self._recover(ctx, state)
+            if ctx.cancelled:
+                outcome, nxt = "cancelled", State.FAILED
+                ctx.message = "Cancelled."
+            else:
+                nxt = TRANSITIONS.get((state, outcome)) or self._recover(ctx, state)
             ctx.store.manifest["transitions"].append(
                 {"state": state.value, "outcome": outcome, "next": nxt.value, "seconds": round(seconds, 2),
-                 "main_rss_gb": rss_gb()})
+                 "cleanup_s": round(cleanup_s, 2), "main_rss_gb": rss_gb()})
             if on_event:
                 on_event(state.value, outcome, ctx.elapsed())
             state = nxt
@@ -219,6 +250,10 @@ class Sketch2Shape:
             ctx.message = str(exc)
             return "empty"
         ctx.store.set("sketch", asdict(ctx.sketch))
+        load_early = getattr(self.models, "load_early", None)
+        if load_early is not None and self.cfg.workers.load_shape_early:
+            # the shape model's GPU is idle while the image is made, so it starts loading now
+            load_early("shape", "hunyuan", ctx.store, **shape_model_job(self.cfg))
         return "ok"
 
     def _understand(self, ctx: RunContext) -> str:
@@ -332,17 +367,27 @@ class Sketch2Shape:
         return project_colours(ctx.mesh, ctx.prepared.rgba_path, self.cfg.export.flip_projection_x)
 
 
+_ENVIRONMENT: dict | None = None
+
+
 def environment_info() -> dict:
-    info = {"python": platform.python_version()}
-    for name in ("torch", "diffusers", "transformers", "trimesh", "gradio", "anthropic"):
+    """Python, package versions and GPU names. Read once per process from package metadata and nvidia-smi:
+    importing the packages and asking torch for the GPUs cost the first run of an app up to ~20 s and
+    opened a CUDA context in this process."""
+    global _ENVIRONMENT
+    if _ENVIRONMENT is None:
+        from importlib import metadata
+        info = {"python": platform.python_version()}
+        for name in ("torch", "diffusers", "transformers", "trimesh", "gradio", "openai", "anthropic"):
+            try:
+                info[name] = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                info[name] = None
         try:
-            info[name] = __import__(name).__version__
-        except Exception:
-            info[name] = None
-    try:
-        import torch
-        if torch.cuda.is_available():
-            info["gpus"] = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
-    except Exception:
-        pass
-    return info
+            out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            info["gpus"] = [line.strip() for line in out.splitlines() if line.strip()]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _ENVIRONMENT = info
+    return dict(_ENVIRONMENT)

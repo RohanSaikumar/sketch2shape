@@ -54,11 +54,21 @@ Every loop has an attempt limit and the whole run has a time budget (`config.yam
 exists, an unexpected error exports the best result so far instead of returning nothing.
 
 **GPU worker processes.** The three heavy steps (SDXL, Hunyuan3D-2 shape, Hunyuan3D-2 texture) each
-run in a short-lived worker process (`sketch2shape/worker.py`) pinned to its GPU, which loads the
-model, does one job, writes files and exits. Keeping all models in one process ran out of Kaggle's
-30 GB of CPU RAM (peak 31 GB while loading the texture model); separate processes give memory back
-after every step, and a crash inside one model cannot take down the app. CLIP and background removal
-are small and run on the CPU in the main process.
+run in a worker process (`sketch2shape/worker.py`) pinned to its GPU. Keeping all models in one process
+ran out of Kaggle's 30 GB of CPU RAM (peak 31 GB while loading the texture model); separate processes
+give memory back, and a crash inside one model cannot take down the app. Loading the models was about
+half of every run, so with two GPUs (`workers` in `config.yaml`):
+
+- SDXL stays loaded between runs in its own worker on GPU 0, which nothing else uses; the app starts
+  loading it, and CLIP and background removal, as soon as it starts;
+- the shape model starts loading on GPU 1 while the image is still being made; that worker exits after
+  its one job, so the texture model, loaded fresh, has GPU 1 and the RAM to itself;
+- a model loads early only when no other worker is loading and at least 16 GB of RAM is free (each
+  Hunyuan model briefly needs ~15 GB while loading).
+
+The models, settings and seeds are the same, so the output does not change. With one GPU every step
+loads its model in a fresh worker. **Cancel** in the app stops a run: GPU work stops at once (SDXL
+stays loaded), a step on the CPU finishes first, and nothing is exported.
 
 **Why no agent framework.** The control flow is short and known in advance; the uncertainty is in the
 model outputs, so the pipeline measures them (gates 1 and 2) instead of asking an LLM what to do next.
@@ -88,8 +98,8 @@ one named the object (`named_by`: `openai:<model>`, `anthropic:<model>`, `clip` 
 | | |
 |---|---|
 | Tested on | Kaggle notebook, 2x NVIDIA T4 (15 GB usable each), Python 3.13.15, PyTorch 2.11.0 + CUDA 12.8 |
-| GPU placement | SDXL worker on GPU 0; Hunyuan3D-2 shape worker, then texture worker, on GPU 1; CLIP and background removal on CPU |
-| Time per model, end to end | **TBD** median, **TBD** slowest (from `scripts/eval_batch.py`; includes about 1 min of model loading per run) |
+| GPU placement | SDXL worker on GPU 0 (kept loaded); Hunyuan3D-2 shape worker, then texture worker, on GPU 1; CLIP and background removal on CPU |
+| Time per model, end to end | 357-389 s in the app on 1 Nov, when every step loaded its model (~3 min of loading per run); about 4 min expected with SDXL kept loaded and the shape model loaded early (to be measured) |
 | Single GPU | set `gpus.hunyuan: 0`; workers run one after another, so a 16 GB GPU is enough |
 
 Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
@@ -101,6 +111,11 @@ Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
 | Hunyuan3D-2 texture | 39-66 s | 12.8 GB (GPU 1) |
 | First-run model loading: SDXL / shape / texture | 41 s / 57 s / 66 s | |
 | Compiling the two CUDA extensions (setup, once) | about 25 s | |
+
+App runs on 1 Nov 2026 (one image at 768 px, 20 steps): SDXL 14 s, shape 19-21 s, texture 41-49 s of
+work; loading 41 s / 64-66 s / 70-72 s, plus ~15 s to start each worker process; scoring on the CPU
+30-60 s. The worker table in each run's `manifest.json` shows how each model was used
+(`kept loaded`, `loaded early` or `fresh`) and how long the run waited for it.
 
 ## Setup and running
 
@@ -159,7 +174,9 @@ python -m pytest -q tests          # offline tests, no GPU needed
 | `... contains custom code in pipeline.py ... Pass trust_remote_code=True` | Run `scripts/setup.sh`; it patches Hunyuan's multiview loader. |
 | CUDA out of memory while texturing | Handled automatically: retries with CPU offload. Only one 3D model is on GPU 1 at a time. |
 | "Your notebook tried to allocate more memory than is available" (CPU RAM) | Fixed by running each heavy model in its own worker process. Check `/kaggle/working/ram.log`; a failed step's log is `runs/<id>/worker_<task>_*.log`. |
-| A step fails with "... worker failed" | Open the worker log named in the message (`runs/<id>/worker_*.log`) for the model's own error. |
+| A step fails with "... worker failed" | Open the worker log named in the message (`runs/<id>/worker_*.log`, or `runs/_workers/serve_*.log` for the kept SDXL worker) for the model's own error. |
+| GPU 0 out of memory in `eval_batch.py` while the app is open | The app keeps SDXL loaded on GPU 0. Stop the app first, or set `workers.keep_loaded: []`. |
+| Cancel takes a few seconds | GPU steps stop at once; a step on the CPU (scoring, up to ~30 s) finishes first. |
 | CUDA extension build fails with pip | `scripts/setup.sh` falls back to `python setup.py install`; its log is in `/tmp/s2s_build_<name>.log`. |
 | Model looks mirrored in projected-colour fallback | Set `export.flip_projection_x: true`. |
 | "The sketch looks empty" | Draw darker or thicker lines, or upload a higher-contrast photo. |

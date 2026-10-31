@@ -13,6 +13,12 @@ from pathlib import Path
 from ..contracts import Candidate
 
 
+def model_job(cfg) -> dict:
+    """The worker fields that choose the SDXL model (the app loads it with these before the first run)."""
+    g = cfg.generate
+    return {"base_model": g.base_model, "controlnet": g.controlnet, "vae": g.vae}
+
+
 def sketch_control(intent, control_scale: float, round_idx: int, g) -> tuple[float, float]:
     """(ControlNet scale, share of the steps it guides) for one round. A rough doodle gets the lighter
     generate.rough settings in its first round; if the fidelity gate rejects that image, retry rounds
@@ -28,8 +34,7 @@ def generate(models, sketch, intent, control_scale: float, n: int, round_idx: in
     seed = int(g.seed) + 1000 * round_idx
     control_scale, control_end = sketch_control(intent, control_scale, round_idx, g)
     result = models.run_worker(
-        "generate", "sdxl", store,
-        base_model=g.base_model, controlnet=g.controlnet, vae=g.vae,
+        "generate", "sdxl", store, **model_job(cfg),
         control_path=str(sketch.control_path), prompt=intent.prompt, negative_prompt=intent.negative_prompt,
         control_scale=control_scale, control_end=control_end, n=int(n), steps=int(g.steps),
         guidance_scale=float(g.guidance_scale), size=int(g.size), seed=seed,

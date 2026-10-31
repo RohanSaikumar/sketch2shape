@@ -5,7 +5,8 @@ right now: a bar weighted by how long each step takes, the current step with its
 time, and the finished steps. Each intermediate result appears as soon as it exists (cleaned sketch,
 candidate image with its score, cut-out, then the untextured 3D shape, which can be rotated while the
 texture is painted). The button is disabled while a model is being made, and only one model is made
-at a time, even if the page is reloaded mid-run.
+at a time, even if the page is reloaded mid-run. Cancel stops the run: GPU work stops at once, a step
+on the CPU finishes first. SDXL and the CPU models start loading when the app starts.
 
 Run:  python app.py            (local)
       python app.py --share    (public gradio.live link, e.g. from a Kaggle notebook)
@@ -30,18 +31,19 @@ from sketch2shape.models import relaunch_with_lean_malloc, stop_leftover_workers
 ROOT = Path(__file__).resolve().parent
 EXAMPLES = sorted((ROOT / "examples" / "sketches").glob("*.png"))
 
-# step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end)
+# step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end).
+# With SDXL kept loaded and the shape model loaded early, a run is ~4 minutes, most of it the texture.
 STEPS = {
-    "preprocess": ("Cleaning up the sketch", 2, 0.00, 0.02),
-    "understand": ("Working out what the object is", 5, 0.02, 0.04),
-    "generate": ("Generating a product-style image that follows your lines (SDXL)", 80, 0.04, 0.28),
-    "score": ("Checking the image follows the sketch", 35, 0.28, 0.38),
-    "prepare": ("Cutting the object out of the chosen image", 5, 0.38, 0.40),
-    "shape": ("Building the 3D shape (Hunyuan3D-2)", 95, 0.40, 0.64),
-    "check_shape": ("Checking the mesh", 5, 0.64, 0.66),
-    "texture": ("Painting the texture (Hunyuan3D-2)", 130, 0.66, 0.95),
-    "check_texture": ("Checking the texture", 5, 0.95, 0.97),
-    "export": ("Saving the GLB and OBJ files", 5, 0.97, 1.00),
+    "preprocess": ("Cleaning up the sketch", 2, 0.00, 0.01),
+    "understand": ("Working out what the object is", 5, 0.01, 0.03),
+    "generate": ("Generating a realistic image that follows your lines (SDXL)", 25, 0.03, 0.14),
+    "score": ("Checking the image follows the sketch", 30, 0.14, 0.27),
+    "prepare": ("Cutting the object out of the chosen image", 2, 0.27, 0.28),
+    "shape": ("Building the 3D shape (Hunyuan3D-2)", 40, 0.28, 0.44),
+    "check_shape": ("Checking the mesh", 2, 0.44, 0.45),
+    "texture": ("Painting the texture (Hunyuan3D-2)", 130, 0.45, 0.96),
+    "check_texture": ("Checking the texture", 2, 0.96, 0.97),
+    "export": ("Saving the GLB and OBJ files", 4, 0.97, 1.00),
 }
 
 # Keeps the progress panel in view while the page scrolls. Older Gradio takes css in Blocks(), 6.x in launch().
@@ -53,8 +55,13 @@ BLOCKS_TAKES_CSS = "css" in inspect.signature(gr.Blocks.__init__).parameters
 
 # Only one model is made at a time. Gradio's queue enforces that per request, but a page reload cancels the
 # request while the pipeline thread keeps running; this guard stops a second run from starting beside it.
-BUSY = {"thread": None, "started": 0.0, "run": ""}
+BUSY = {"thread": None, "started": 0.0, "run": "", "ctx": None}
 BUSY_LOCK = threading.Lock()
+
+
+def run_in_progress() -> bool:
+    with BUSY_LOCK:
+        return BUSY["thread"] is not None and BUSY["thread"].is_alive()
 
 
 # ------------------------------------------------------------------ pieces of the page
@@ -80,7 +87,8 @@ def panel(fraction: float, title: str, detail: str = "", done: list[str] | None 
 
 
 IDLE = panel(0.0, "Ready", "Draw a sketch or upload one, optionally describe it, then click "
-             "<b>Make 3D model</b>. A model takes about 5-6 minutes on Kaggle's free T4 GPUs.", state="idle")
+             "<b>Make 3D model</b>. A model takes about 4-5 minutes on Kaggle's free T4 GPUs "
+             "(the first one after the app starts a little longer).", state="idle")
 
 
 def thumbnail(path: Path, size: int = 384) -> str | None:
@@ -212,7 +220,8 @@ def model_maker(pipeline: Sketch2Shape):
                        panel(0.0, "Already making a model",
                              f"A model started {elapsed_text(time.monotonic() - BUSY['started'])} ago "
                              f"(run {html.escape(BUSY['run'])}) is still being made. Try again when it "
-                             "finishes; only one model is made at a time.", state="error"))
+                             "finishes, or stop it with <b>Cancel</b>; only one model is made at a time.",
+                             state="error"))
                 return
             image, source = pick_input(mode, canvas, upload)
             ctx = pipeline.new_context(image, prompt or "", source)
@@ -224,7 +233,7 @@ def model_maker(pipeline: Sketch2Shape):
                 holder["result"] = pipeline.finish(ctx, pipeline.drive(ctx, lambda *e: events.put(e)))
 
             worker = threading.Thread(target=work, daemon=True)
-            BUSY.update(thread=worker, started=time.monotonic(), run=run_dir.name)
+            BUSY.update(thread=worker, started=time.monotonic(), run=run_dir.name, ctx=ctx)
             worker.start()
 
         started = time.monotonic()
@@ -256,6 +265,8 @@ def model_maker(pipeline: Sketch2Shape):
                 fraction = max(fraction, low + (high - low) * min(0.95, spent / usual))
                 title = label
                 detail = f"{int(spent)} s of about {usual} s &middot; elapsed {elapsed_text(time.monotonic() - started)}"
+            if ctx.cancelled:
+                title, detail = "Cancelling...", "Stopping the current step (a step on the CPU finishes first)."
 
             try:                            # the live view must never stop the run
                 items = gallery_items(run_dir, ctx.store.manifest)
@@ -281,6 +292,9 @@ def model_maker(pipeline: Sketch2Shape):
             detail = (f"{html.escape(result.message)} Download the model below, or drag the viewer to rotate it."
                       + (f"<br><i>Notes:</i> {html.escape(' '.join(warnings[:3]))}" if warnings else ""))
             final = panel(1.0, "Done", detail, done, state="done")
+        elif ctx.cancelled:
+            final = panel(fraction, "Cancelled", "The run was stopped. Click <b>Make 3D model</b> to start "
+                          "another one.", done, state="idle")
         else:
             final = panel(fraction, "Could not make a model", html.escape(result.message), done, state="error")
         viewer = gr.update(value=str(result.glb_path), label="3D model (drag to rotate)") if result.glb_path else skip
@@ -313,7 +327,9 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                 prompt = gr.Textbox(label="Description (optional)",
                                     placeholder="e.g. a matte red ceramic mug, or a wooden chair. "
                                                 "Leave empty to let the app decide.")
-                button = gr.Button("Make 3D model", variant="primary")
+                with gr.Row():
+                    button = gr.Button("Make 3D model", variant="primary", scale=3)
+                    stop = gr.Button("Cancel", variant="stop", interactive=False, scale=1)
             with gr.Column():
                 viewer = gr.Model3D(label="3D model (drag to rotate)", clear_color=(1, 1, 1, 1), height=440)
                 files = gr.File(label="Downloads", file_count="multiple")
@@ -330,13 +346,28 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                 old_files = gr.File(label="Its downloads", file_count="multiple")
             old_gallery = gr.Gallery(label="Its steps", columns=5, height=200)
 
+        def cancel_run():
+            with BUSY_LOCK:
+                running, ctx = BUSY["thread"], BUSY["ctx"]
+            if running is None or not running.is_alive() or ctx is None:
+                return gr.update()
+            pipeline.cancel(ctx)
+            return gr.update(interactive=False, value="Cancelling...")
+
+        def idle_buttons():                 # Cancel stays usable if another tab's run is still going
+            return (gr.update(interactive=True, value="Make 3D model"),
+                    gr.update(interactive=run_in_progress(), value="Cancel"))
+
         draw_tab.select(lambda: "canvas", None, mode)
         upload_tab.select(lambda: "upload", None, mode)
-        (button.click(lambda: gr.update(interactive=False, value="Working... please wait"), None, button, queue=False)
+        (button.click(lambda: (gr.update(interactive=False, value="Working... please wait"),
+                               gr.update(interactive=True, value="Cancel")), None, [button, stop], queue=False)
                .then(make_model, [canvas, upload, prompt, mode], [viewer, files, gallery, details, status],
                      show_progress="hidden")
-               .then(lambda: gr.update(interactive=True, value="Make 3D model"), None, button, queue=False)
+               .then(idle_buttons, None, [button, stop], queue=False)
                .then(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False))
+        stop.click(cancel_run, None, stop, queue=False)
+        demo.load(lambda: gr.update(interactive=run_in_progress()), None, stop, queue=False)
         refresh.click(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False)
         history.change(lambda name: show_past_run(runs_dir, name), history, [old_viewer, old_files, old_gallery],
                        queue=False)
@@ -354,7 +385,9 @@ def main() -> None:
     cfg = load_config(args.config)
     runs = Path(cfg.runs_dir).resolve()
     runs.mkdir(parents=True, exist_ok=True)
-    demo = build_app(Sketch2Shape(cfg))
+    pipeline = Sketch2Shape(cfg)
+    pipeline.models.warm_up()               # SDXL and the CPU models load while the page opens
+    demo = build_app(pipeline)
     launch_args = {} if BLOCKS_TAKES_CSS else {"css": CSS}
     demo.queue(default_concurrency_limit=1).launch(share=args.share, server_port=args.port,
                                                    allowed_paths=[str(runs), str(ROOT / "examples")],

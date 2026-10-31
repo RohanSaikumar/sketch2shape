@@ -275,6 +275,106 @@ def test_worker_process_round_trip(cfg, store):
     assert list(store.dir.glob("worker_no_such_task_*.log"))
 
 
+@pytest.fixture
+def serving_models(tmp_path, monkeypatch):
+    """A ModelManager that keeps the test 'ping' worker loaded, as it keeps SDXL loaded on two GPUs."""
+    from sketch2shape.models import ModelManager
+    cfg = load_config(overrides={"runs_dir": str(tmp_path / "runs"), "workers.keep_loaded": ["ping"],
+                                 "workers.min_free_ram_gb": 0})
+    monkeypatch.setattr(ModelManager, "separate_gpus", lambda self: True)
+    models = ModelManager(cfg)
+    yield models
+    models.end_run()
+    for worker in models._kept.values():
+        worker.stop(wait_s=5)
+
+
+def test_a_kept_worker_serves_several_jobs(serving_models, store):
+    assert serving_models.run_worker("ping", "sdxl", store)["ok"]
+    assert serving_models.run_worker("ping", "sdxl", store)["ok"]
+    kept = serving_models._kept["ping"]
+    assert kept.alive() and kept.jobs == 2
+    assert [w["how"] for w in store.manifest["workers"]] == ["kept loaded", "kept loaded"]
+
+
+def test_cancel_stops_the_job_but_keeps_the_model_loaded(serving_models, store):
+    import threading
+    import time
+    from sketch2shape.models import WorkerError
+    serving_models.run_worker("ping", "sdxl", store)
+    threading.Timer(0.5, serving_models.cancel).start()
+    started = time.monotonic()
+    with pytest.raises(WorkerError, match="Cancelled"):
+        serving_models.run_worker("ping", "sdxl", store, seconds=30)
+    assert time.monotonic() - started < 5
+    serving_models.new_run()
+    assert serving_models.run_worker("ping", "sdxl", store)["ok"]     # the same loaded worker takes the next job
+    assert serving_models._kept["ping"].jobs == 2
+
+
+def test_a_worker_loaded_early_takes_its_one_job_then_exits(serving_models, store):
+    import time
+    serving_models.load_early("ping", "hunyuan", store)
+    deadline = time.monotonic() + 30
+    while "ping" not in serving_models._early and time.monotonic() < deadline:
+        time.sleep(0.1)
+    early = serving_models._early["ping"]
+    assert serving_models.run_worker("ping", "hunyuan", store)["ok"]
+    assert not early.alive() and not serving_models._early
+    assert store.manifest["workers"][-1]["how"] == "loaded early"
+    assert store.manifest["loaded_early"][0]["task"] == "ping"
+
+
+def test_end_run_stops_a_worker_the_run_never_used(serving_models, store):
+    import time
+    serving_models.load_early("ping", "hunyuan", store)
+    deadline = time.monotonic() + 30
+    while "ping" not in serving_models._early and time.monotonic() < deadline:
+        time.sleep(0.1)
+    early = serving_models._early["ping"]
+    serving_models.end_run()
+    assert not early.alive() and not serving_models._early
+
+
+def test_models_loaded_ahead_match_the_jobs_sent_later(cfg):
+    """SDXL is loaded at app start and the shape model early with these fields; the jobs must carry the same."""
+    from sketch2shape.models import LOAD_KEYS
+    from sketch2shape.stages.generate import model_job
+    from sketch2shape.stages.reconstruct import shape_model_job
+    assert set(model_job(cfg)) == set(LOAD_KEYS["generate"])
+    assert set(shape_model_job(cfg)) == set(LOAD_KEYS["shape"])
+
+
+def test_cancel_kills_a_fresh_worker(cfg, store):
+    import threading
+    import time
+    from sketch2shape.models import ModelManager, WorkerError
+    models = ModelManager(cfg)                  # ping is not kept loaded: a fresh worker per job
+    threading.Timer(1.0, models.cancel).start()
+    started = time.monotonic()
+    with pytest.raises(WorkerError, match="Cancelled"):
+        models.run_worker("ping", "sdxl", store, seconds=30)
+    assert time.monotonic() - started < 10
+
+
+def test_cancel_ends_the_run_after_the_current_step_without_exporting(cfg):
+    pipe = Sketch2Shape(cfg, models=object())
+    ctx = pipe.new_context(image=None)
+
+    def generate(c):
+        pipe.cancel(c)                          # Cancel pressed while the image is being made
+        raise RuntimeError("worker stopped")
+
+    exported = []
+    pipe.handlers.update({State.PREPROCESS: scripted(["ok"]), State.UNDERSTAND: scripted(["ok"]),
+                          State.GENERATE: generate, State.EXPORT: lambda c: exported.append(1) or "ok"})
+    result = pipe.finish(ctx, pipe.drive(ctx))
+    assert not result.ok and result.message == "Cancelled." and result.manifest["result"]["cancelled"]
+    last = ctx.store.manifest["transitions"][-1]
+    assert (last["state"], last["outcome"], last["next"]) == ("generate", "cancelled", "failed")
+    assert not exported and "cleanup_s" in last and "setup_s" in ctx.store.manifest
+
+
 def test_empty_sketch_fails_with_a_message(cfg):
     pipe = Sketch2Shape(cfg, models=object())
     result = pipe.run(Image.new("RGBA", (256, 256), (0, 0, 0, 0)), source="canvas")

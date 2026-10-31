@@ -16,12 +16,17 @@ from PIL import Image
 from .validate import as_trimesh
 
 
+def shape_model_job(cfg) -> dict:
+    """The worker fields that choose the shape model (the pipeline starts loading it with these early)."""
+    r = cfg.reconstruct
+    return {"model": r.model, "subfolder": r.shape_subfolder, "flashvdm": bool(r.flashvdm)}
+
+
 def make_shape(models, prepared, seed: int, store, cfg) -> trimesh.Trimesh:
     r = cfg.reconstruct
     out = store.path(f"07_shape_seed{seed}.glb")
-    models.run_worker("shape", "hunyuan", store, model=r.model, subfolder=r.shape_subfolder,
-                      steps=int(r.shape_steps), flashvdm=bool(r.flashvdm),
-                      octree_resolution=int(r.octree_resolution),
+    models.run_worker("shape", "hunyuan", store, **shape_model_job(cfg),
+                      steps=int(r.shape_steps), octree_resolution=int(r.octree_resolution),
                       image=str(prepared.rgba_path), seed=int(seed), out=str(out))
     return as_trimesh(trimesh.load(out, force="scene"))
 
