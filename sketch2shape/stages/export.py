@@ -18,7 +18,7 @@ from pathlib import Path
 import trimesh
 
 from ..contracts import ExportBundle
-from .validate import as_trimesh, is_textured
+from .validate import as_trimesh, is_textured, texture_image
 
 
 def normalize(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -33,6 +33,21 @@ def normalize(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 # trimesh writes no metallicFactor (read as 1.0, metal) and a 0.4 grey baseColorFactor, which darkens the
 # texture to 40 %. White factor + non-metallic shows the texture (or vertex colours) as generated.
 MATTE = {"metallicFactor": 0.0, "roughnessFactor": 0.85, "baseColorFactor": [1.0, 1.0, 1.0, 1.0]}
+
+
+def matte_material(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Give a textured mesh a non-metallic material with a white colour factor before any export.
+
+    Hunyuan's textured mesh carries a material whose diffuse colour is 0.4 grey; both the GLB
+    (baseColorFactor) and the OBJ's MTL (Kd) multiply the texture by it, so models came out at 40 %
+    brightness. Vertex-coloured meshes have no material and are left as they are.
+    """
+    image = texture_image(mesh)
+    if image is not None:
+        mesh.visual.material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=image, baseColorFactor=[255, 255, 255, 255],
+            metallicFactor=0.0, roughnessFactor=0.85, doubleSided=True)
+    return mesh
 
 
 def make_glb_matte(path: Path) -> None:
@@ -82,6 +97,7 @@ def export_mesh(mesh, store, cfg) -> ExportBundle:
     mesh = as_trimesh(mesh)
     if cfg.export.normalize:
         mesh = normalize(mesh)
+    mesh = matte_material(mesh)
     glb_path = store.path("model.glb")
     mesh.export(glb_path)
     try:

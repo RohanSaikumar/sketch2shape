@@ -171,6 +171,18 @@ def test_export_round_trip_keeps_geometry_and_texture(cfg, store):
     assert "model.obj" in names and any(n.endswith(".mtl") for n in names)
 
 
+def test_obj_material_is_not_darkened(cfg, store):
+    """The MTL's Kd multiplies the texture; Hunyuan's material had 0.4 grey, so OBJs opened dark."""
+    sphere = textured_sphere()
+    sphere.visual.material.diffuse = [102, 102, 102, 255]       # what Hunyuan's mesh carries
+    bundle = export_mesh(sphere, store, cfg)
+    with zipfile.ZipFile(bundle.obj_zip_path) as z:
+        mtl = next(n for n in z.namelist() if n.endswith(".mtl"))
+        kd = [line.split()[1:4] for line in z.read(mtl).decode().splitlines() if line.startswith("Kd ")]
+        assert any(n.endswith(".png") or n.endswith(".jpg") for n in z.namelist())   # texture travels along
+    assert kd and all(abs(float(v) - 1.0) < 1e-3 for row in kd for v in row), kd
+
+
 def glb_json(path):
     import json
     import struct
