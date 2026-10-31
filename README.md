@@ -4,6 +4,11 @@ Turn a rough 2D sketch into a textured, exportable 3D model. Draw on a canvas or
 optionally describe the object, and get a `.glb` (texture embedded) and a zipped `.obj` you can open
 in Blender, Windows 3D Viewer or any glTF viewer.
 
+While a model is being made, the app shows what is happening right now: a progress bar, the current
+step with its elapsed and usual time, a checklist of finished steps, and each intermediate result as it
+appears (cleaned sketch, candidate images with their scores, cut-out, then the untextured 3D shape,
+which can be rotated while the texture is painted).
+
 Built for TechZephyr 4.0 (IIT Bhubaneswar), problem statement "Sketch2Shape AI".
 
 > Numbers marked **TBD** are filled in from `scripts/eval_batch.py` runs on the hardware listed below.

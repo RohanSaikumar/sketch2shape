@@ -1,30 +1,50 @@
 """Gradio app: draw or upload a sketch, add an optional description, get a textured 3D model.
 
+While a model is being made, the page shows what is happening right now: a progress bar weighted by
+how long each step takes, the current step with its elapsed and usual time, a checklist of finished
+steps, and each intermediate result as soon as it exists (cleaned sketch, candidate images with
+scores, cut-out, then the untextured 3D shape, which can be rotated while the texture is painted).
+
 Run:  python app.py            (local)
       python app.py --share    (public gradio.live link, e.g. from a Kaggle notebook)
 """
 from __future__ import annotations
 
 import argparse
+import queue
+import threading
+import time
 from pathlib import Path
 
 import gradio as gr
 
 from sketch2shape import Sketch2Shape, load_config
 
-PROGRESS = {"preprocess": 0.05, "understand": 0.1, "generate": 0.3, "score": 0.35, "prepare": 0.4,
-            "shape": 0.55, "check_shape": 0.6, "texture": 0.85, "check_texture": 0.9, "export": 1.0}
+# step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end)
+STEPS = {
+    "preprocess": ("Cleaning up the sketch", 2, 0.00, 0.02),
+    "understand": ("Working out what the object is", 10, 0.02, 0.05),
+    "generate": ("Generating product-style images that follow your lines (SDXL)", 110, 0.05, 0.35),
+    "score": ("Checking which image follows the sketch best", 20, 0.35, 0.40),
+    "prepare": ("Cutting the object out of the chosen image", 5, 0.40, 0.42),
+    "shape": ("Building the 3D shape (Hunyuan3D-2)", 85, 0.42, 0.65),
+    "check_shape": ("Checking the mesh", 5, 0.65, 0.67),
+    "texture": ("Painting the texture (Hunyuan3D-2)", 115, 0.67, 0.95),
+    "check_texture": ("Checking the texture", 5, 0.95, 0.97),
+    "export": ("Saving the GLB and OBJ files", 5, 0.97, 1.00),
+}
 
 
-def gallery_items(result) -> list[tuple[str, str]]:
-    run_dir = Path(result.run_dir)
+def gallery_items(run_dir: Path, manifest: dict) -> list[tuple[str, str]]:
     items = []
     if (run_dir / "02_lineart.png").exists():
         items.append((str(run_dir / "02_lineart.png"), "cleaned sketch"))
-    chosen = result.manifest.get("chosen_candidate")
-    for c in result.manifest.get("candidates", []):
-        label = f"score {c['total']:.2f}" + ("  (chosen)" if c["path"] == chosen else "")
-        items.append((str(run_dir / c["path"]), label))
+    scored = {c["path"]: c for c in manifest.get("candidates", [])}
+    chosen = manifest.get("chosen_candidate")
+    for path in sorted(run_dir.glob("05_candidate_r*_[0-9].png")):
+        c = scored.get(path.name)
+        label = "scoring..." if c is None else f"score {c['total']:.2f}" + ("  (chosen)" if path.name == chosen else "")
+        items.append((str(path), label))
     if (run_dir / "06_prepared.png").exists():
         items.append((str(run_dir / "06_prepared.png"), "input to 3D"))
     return items
@@ -39,30 +59,93 @@ def run_summary(manifest: dict) -> dict:
         "result": manifest.get("result"),
         "export": manifest.get("export"),
         "timings_s": manifest.get("timings_s"),
+        "workers": manifest.get("workers"),
         "warnings": manifest.get("warnings"),
         "run_folder": manifest.get("run_id"),
     }
 
 
-def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
+def status_text(done: list[str], current: tuple[str, float] | None, total_s: float) -> str:
+    lines = [f"**Elapsed: {int(total_s) // 60}:{int(total_s) % 60:02d}**"]
+    if current:
+        label, usual = STEPS[current[0]][:2]
+        lines.append(f"Now: {label}: {int(time.monotonic() - current[1])} s (usually about {usual} s)")
+    lines += [f"- done: {line}" for line in done]
+    return "\n\n".join(lines[:2]) + ("\n\n" + "\n".join(lines[2:]) if len(lines) > 2 else "")
+
+
+def model_maker(pipeline: Sketch2Shape):
+    """The button handler: runs the pipeline in a thread and streams progress and partial results."""
     def make_model(canvas, upload, prompt, progress=gr.Progress()):
         image, source = (upload, "upload") if upload is not None else (canvas, "canvas")
+        ctx = pipeline.new_context(image, prompt or "", source)
+        run_dir = Path(ctx.store.dir)
+        events: queue.Queue = queue.Queue()
+        holder = {}
 
-        def on_event(state: str, outcome: str, elapsed: float) -> None:
-            progress(PROGRESS.get(state, 0.0), desc=f"{state.replace('_', ' ')}: {outcome} ({elapsed:.0f} s)")
+        def work():
+            holder["result"] = pipeline.finish(ctx, pipeline.drive(ctx, lambda *e: events.put(e)))
 
-        result = pipeline.run(image, prompt or "", source, on_event)
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        started = time.monotonic()
+        done, current, fraction = [], None, 0.0
+        shown_items, shown_shape = 0, None
+        skip = gr.update()
+
+        while worker.is_alive() or not events.empty():
+            changed = False
+            try:
+                state, outcome, _ = events.get(timeout=1.0)
+                if outcome == "start":
+                    current = (state, time.monotonic())
+                else:
+                    took = time.monotonic() - current[1] if current else 0.0
+                    done.append(f"{STEPS[state][0]} ({outcome}, {took:.0f} s)")
+                    fraction = max(fraction, STEPS[state][3])
+                    current = None
+                changed = True
+            except queue.Empty:
+                pass
+            if current:
+                label, usual, low, high = STEPS[current[0]]
+                within = min(0.95, (time.monotonic() - current[1]) / usual)
+                fraction = max(fraction, low + (high - low) * within)
+                progress(fraction, desc=f"{label}: {int(time.monotonic() - current[1])} s of about {usual} s")
+
+            items = gallery_items(run_dir, ctx.store.manifest)
+            gallery_update = items if (changed or len(items) != shown_items) else skip
+            shown_items = len(items)
+            shapes = sorted(run_dir.glob("07_shape_seed*.glb"))
+            viewer_update = skip
+            if shapes and shapes[-1] != shown_shape:
+                shown_shape = shapes[-1]
+                viewer_update = gr.update(value=str(shown_shape), label="3D shape (texture still in progress)")
+            yield (viewer_update, skip, gallery_update, skip,
+                   status_text(done, current, time.monotonic() - started))
+
+        result = holder.get("result")
+        if result is None:
+            yield (skip, skip, skip, skip, f"**Something went wrong.** See runs/{run_dir.name}/manifest.json.")
+            return
         files = [str(p) for p in (result.glb_path, result.obj_zip_path) if p]
         status = ("**Done.** " if result.ok else "**Could not make a model.** ") + result.message
         warnings = result.manifest.get("warnings") or []
         if result.ok and warnings:
             status += "\n\nNotes: " + " ".join(warnings[:3])
-        return (str(result.glb_path) if result.glb_path else None, files or None,
-                gallery_items(result), run_summary(result.manifest), status)
+        status += "\n\n" + "\n".join(f"- done: {line}" for line in done)
+        viewer = gr.update(value=str(result.glb_path), label="3D model (drag to rotate)") if result.glb_path else skip
+        yield (viewer, files or None, gallery_items(run_dir, result.manifest), run_summary(result.manifest), status)
 
+    return make_model
+
+
+def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
+    make_model = model_maker(pipeline)
     with gr.Blocks(title="Sketch2Shape") as demo:
-        gr.Markdown("# Sketch2Shape\nDraw a sketch or upload one, optionally describe it, "
-                    "and get a textured 3D model you can download as .glb or .obj.")
+        gr.Markdown("# Sketch2Shape\nDraw a sketch or upload one, optionally describe it, and get a textured "
+                    "3D model you can download as .glb or .obj. On Kaggle's free T4 GPUs a model takes "
+                    "about 5-7 minutes; each step and its result appear below as soon as they are ready.")
         with gr.Row():
             with gr.Column():
                 with gr.Tab("Draw"):
@@ -78,8 +161,8 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
             with gr.Column():
                 viewer = gr.Model3D(label="3D model (drag to rotate)", clear_color=(1, 1, 1, 1), height=440)
                 files = gr.File(label="Downloads", file_count="multiple")
-        with gr.Accordion("How it was made", open=False):
-            gallery = gr.Gallery(label="Steps", columns=4, height=280)
+        gallery = gr.Gallery(label="Steps so far", columns=5, height=240)
+        with gr.Accordion("Run details", open=False):
             details = gr.JSON(label="Run summary")
         button.click(make_model, [canvas, upload, prompt], [viewer, files, gallery, details, status])
     return demo

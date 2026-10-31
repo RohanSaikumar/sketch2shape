@@ -151,7 +151,10 @@ class Sketch2Shape:
     def run(self, image, prompt: str = "", source: str = "upload",
             on_event: EventCallback | None = None) -> RunResult:
         ctx = self.new_context(image, prompt, source)
-        final = self.drive(ctx, on_event)
+        return self.finish(ctx, self.drive(ctx, on_event))
+
+    def finish(self, ctx: RunContext, final: State) -> RunResult:
+        """Record the outcome in manifest.json and build the result."""
         ok = final == State.DONE
         if ok and not ctx.message:
             ctx.message = f"Done in {ctx.elapsed():.0f} s."
@@ -169,10 +172,14 @@ class Sketch2Shape:
         )
 
     def drive(self, ctx: RunContext, on_event: EventCallback | None = None, max_steps: int = 40) -> State:
+        """Run the state machine. on_event(state, outcome, elapsed) is called with outcome "start" when a
+        step begins and with its outcome when it ends, so a UI can show what is happening right now."""
         state = State.PREPROCESS
         for _ in range(max_steps):
             if state in TERMINAL:
                 return state
+            if on_event:
+                on_event(state.value, "start", ctx.elapsed())
             started = time.monotonic()
             try:
                 outcome = self.handlers[state](ctx)

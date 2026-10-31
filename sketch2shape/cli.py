@@ -31,7 +31,7 @@ def main(argv=None) -> int:
     cfg = load_config(args.config, overrides)
 
     def on_event(state: str, outcome: str, elapsed: float) -> None:
-        print(f"[{elapsed:6.1f} s] {state:<14} -> {outcome}", flush=True)
+        print(f"[{elapsed:6.1f} s] {state:<14} {'...' if outcome == 'start' else '-> ' + outcome}", flush=True)
 
     result = Sketch2Shape(cfg).run(Image.open(args.sketch), prompt=args.prompt, source="upload", on_event=on_event)
     m = result.manifest
