@@ -74,6 +74,7 @@ def run_summary(manifest: dict) -> dict:
         "export": manifest.get("export"),
         "timings_s": manifest.get("timings_s"),
         "workers": manifest.get("workers"),
+        "score_timings_s": manifest.get("score_timings_s"),
         "warnings": manifest.get("warnings"),
         "run_folder": manifest.get("run_id"),
     }
