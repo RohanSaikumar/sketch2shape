@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import gradio as gr
+from PIL import Image
 
 from sketch2shape import Sketch2Shape, load_config
 from sketch2shape.models import relaunch_with_lean_malloc, stop_leftover_workers
@@ -36,18 +37,30 @@ STEPS = {
 }
 
 
+def thumbnail(path: Path, size: int = 384) -> str:
+    """A small JPEG of an intermediate image (~25 KB instead of ~1 MB), so the live view works on slow links."""
+    target = path.parent / "thumbs" / (path.stem + ".jpg")
+    if not target.exists():
+        target.parent.mkdir(exist_ok=True)
+        image = Image.open(path).convert("RGBA")
+        flat = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image).convert("RGB")
+        flat.thumbnail((size, size))
+        flat.save(target, quality=82)
+    return str(target)
+
+
 def gallery_items(run_dir: Path, manifest: dict) -> list[tuple[str, str]]:
     items = []
     if (run_dir / "02_lineart.png").exists():
-        items.append((str(run_dir / "02_lineart.png"), "cleaned sketch"))
+        items.append((thumbnail(run_dir / "02_lineart.png"), "cleaned sketch"))
     scored = {c["path"]: c for c in manifest.get("candidates", [])}
     chosen = manifest.get("chosen_candidate")
     for path in sorted(run_dir.glob("05_candidate_r*_[0-9].png")):
         c = scored.get(path.name)
         label = "scoring..." if c is None else f"score {c['total']:.2f}" + ("  (chosen)" if path.name == chosen else "")
-        items.append((str(path), label))
+        items.append((thumbnail(path), label))
     if (run_dir / "06_prepared.png").exists():
-        items.append((str(run_dir / "06_prepared.png"), "input to 3D"))
+        items.append((thumbnail(run_dir / "06_prepared.png"), "input to 3D"))
     return items
 
 
