@@ -49,6 +49,10 @@ def main() -> None:
     parser.add_argument("--config")
     args = parser.parse_args()
 
+    import torch
+    if not torch.cuda.is_available():
+        sys.exit("No CUDA GPU found. On Kaggle: Session options, Accelerator 'GPU T4 x2', then run again.")
+
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8")) if args.prompts else {}
