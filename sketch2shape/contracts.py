@@ -23,6 +23,8 @@ class Intent:
     negative_prompt: str
     details: str = ""
     drawing: str = ""       # "clean" or "rough" (the LLM's judgement of the sketch); "" when unknown
+    kind: str = ""          # "object", or "scene" (made as a miniature diorama); "" when unknown
+    up: str = ""            # which edge the top of the drawing pointed to before it was turned upright
 
 
 @dataclass
@@ -35,6 +37,7 @@ class Candidate:
     scores: dict = field(default_factory=dict)
     total: float = 0.0
     cutout_path: Path | None = None
+    judged: str = ""        # the vision-LLM image check: "picked", "rejected", or "" when it did not run
 
 
 @dataclass

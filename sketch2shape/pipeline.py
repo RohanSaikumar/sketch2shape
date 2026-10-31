@@ -19,12 +19,14 @@ from typing import Callable
 
 from .config import load_config
 from .contracts import Candidate, ExportBundle, Intent, PreparedImage, SketchAsset
+from .llm import provider
 from .models import ModelManager, free_memory, rss_gb
 from .runstore import RunStore
 from .stages.export import export_mesh
 from .stages.generate import generate
+from .stages.image_check import check_images
 from .stages.prepare import prepare
-from .stages.preprocess import EmptySketchError, preprocess
+from .stages.preprocess import EmptySketchError, preprocess, turn_upright
 from .stages.reconstruct import make_shape, paint_mesh, project_colours, shape_model_job
 from .stages.score import score_candidates
 from .stages.understand import understand
@@ -88,6 +90,8 @@ class RunContext:
     best: Candidate | None = None
     prepared: PreparedImage | None = None
     rounds: int = 0
+    strict: bool = False                # an image drifted from the lines: follow them on every step
+    negative_base: str = ""             # the negative prompt before the image check's "avoid" words
     shape_attempts: int = 0
     mesh: object = None                 # current untextured shape
     best_shape: object = None
@@ -149,7 +153,9 @@ class Sketch2Shape:
             store=store, image=image, prompt=(prompt or "").strip(), source=source,
             budget_s=float(self.cfg.time_budget_s),
             control_scale=float(self.cfg.generate.control_scale),
-            candidates_n=int(self.cfg.generate.candidates),
+            # two images give the vision-LLM check a choice; without a key the line scores pick, and
+            # a second cut-out on the CPU would cost ~30 s for little gain
+            candidates_n=int(self.cfg.generate.candidates) if provider(self.cfg) else 1,
         )
         store.set("inputs", {"prompt": ctx.prompt, "source": source})
         store.set("config", self.cfg.raw)
@@ -258,6 +264,10 @@ class Sketch2Shape:
 
     def _understand(self, ctx: RunContext) -> str:
         ctx.intent = understand(self.models, ctx.sketch, ctx.prompt, self.cfg, ctx.store)
+        ctx.negative_base = ctx.intent.negative_prompt
+        turns = turn_upright(ctx.sketch, ctx.intent.up)
+        if turns:
+            ctx.store.warn(f"The drawing was {'upside down' if turns == 2 else 'sideways'}; turned it upright.")
         if ctx.intent.label is None and not ctx.prompt:
             g = self.cfg.generate      # unknown object and no prompt: lean harder on the lines
             ctx.control_scale = min(g.max_control_scale, ctx.control_scale + g.control_scale_step)
@@ -266,7 +276,7 @@ class Sketch2Shape:
 
     def _generate(self, ctx: RunContext) -> str:
         fresh, used_n = generate(self.models, ctx.sketch, ctx.intent, ctx.control_scale,
-                                 ctx.candidates_n, ctx.rounds, ctx.store, self.cfg)
+                                 ctx.candidates_n, ctx.rounds, ctx.store, self.cfg, strict=ctx.strict)
         if used_n < ctx.candidates_n:
             ctx.store.warn(f"Generated {used_n} candidate(s) instead of {ctx.candidates_n} to fit in GPU memory.")
             ctx.candidates_n = used_n
@@ -274,24 +284,47 @@ class Sketch2Shape:
         return "ok"
 
     def _score(self, ctx: RunContext) -> str:
+        """Gate 1. The vision LLM (when there is a key) picks the usable image of this round, or rejects them
+        all; the line scores then check the pick follows the sketch. A rejection retries with new seeds and
+        the check's words added to the negative prompt; an image that drifted from the lines retries with
+        stronger sketch control. A scene's diorama is judged by the check alone."""
+        fresh = [c for c in ctx.candidates if c.round == ctx.rounds and not c.scores and not c.judged]
+        verdict = check_images(ctx.sketch, ctx.intent, fresh, self.cfg, ctx.store)
         score_candidates(self.models, ctx.sketch, ctx.intent,
-                         [c for c in ctx.candidates if not c.scores], self.cfg, ctx.store)
-        ctx.best = max(ctx.candidates, key=lambda c: c.total)
-        ctx.store.set("candidates", [
-            {"path": c.path.name, "round": c.round, "seed": c.seed, "index": c.index,
-             "control_scale": c.control_scale, "scores": c.scores, "total": c.total}
-            for c in ctx.candidates])
-        ctx.store.set("chosen_candidate", ctx.best.path.name)
+                         [c for c in fresh if c.judged != "rejected"], self.cfg, ctx.store)
+        usable = [c for c in ctx.candidates if c.judged != "rejected" and c.scores]
+        ctx.best = max(usable, key=lambda c: c.total) if usable else None
         s, g = self.cfg.score, self.cfg.generate
-        if ctx.best.total >= s.threshold:
-            return "pass"
+        scene = ctx.intent.kind == "scene"
+        if ctx.best is not None and (ctx.best.total >= s.threshold or (scene and ctx.best.judged == "picked")):
+            return self._log_candidates(ctx, "pass")
         if ctx.rounds < s.max_rounds and not ctx.over_budget():
             ctx.rounds += 1
-            ctx.control_scale = min(g.max_control_scale, ctx.control_scale + g.control_scale_step)
-            return "retry"
-        ctx.store.warn(f"No candidate reached the sketch-fidelity threshold ({s.threshold}); "
-                       f"using the best one ({ctx.best.total:.2f}).")
-        return "give_up"
+            if verdict is not None and verdict["best"] is None:     # all rejected: avoid what the check saw
+                if verdict["avoid"]:            # replaces earlier ones, so the prompt stays within 77 tokens
+                    ctx.intent.negative_prompt = f"{verdict['avoid']}, {ctx.negative_base or ctx.intent.negative_prompt}"
+            elif not scene:                                         # drifted from the lines: follow them
+                ctx.strict = True
+                ctx.control_scale = min(g.max_control_scale, ctx.control_scale + g.control_scale_step)
+            return self._log_candidates(ctx, "retry")
+        if ctx.best is None:            # every image was rejected: fall back to the line scores alone
+            score_candidates(self.models, ctx.sketch, ctx.intent,
+                             [c for c in ctx.candidates if not c.scores], self.cfg, ctx.store)
+            ctx.best = max(ctx.candidates, key=lambda c: c.total)
+            ctx.store.warn("The image check rejected every image; using the one that follows the sketch best.")
+        else:
+            ctx.store.warn(f"No image reached the sketch-fidelity threshold ({s.threshold}); "
+                           f"using the best one ({ctx.best.total:.2f}).")
+        return self._log_candidates(ctx, "give_up")
+
+    def _log_candidates(self, ctx: RunContext, outcome: str) -> str:
+        ctx.store.set("candidates", [
+            {"path": c.path.name, "round": c.round, "seed": c.seed, "index": c.index,
+             "control_scale": c.control_scale, "judged": c.judged, "scores": c.scores, "total": c.total}
+            for c in ctx.candidates])
+        if ctx.best is not None:
+            ctx.store.set("chosen_candidate", ctx.best.path.name)
+        return outcome
 
     def _prepare(self, ctx: RunContext) -> str:
         ctx.prepared = prepare(self.models, ctx.best, ctx.store, self.cfg)

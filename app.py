@@ -37,7 +37,7 @@ STEPS = {
     "preprocess": ("Cleaning up the sketch", 2, 0.00, 0.01),
     "understand": ("Working out what the object is", 5, 0.01, 0.03),
     "generate": ("Generating a realistic image that follows your lines (SDXL)", 25, 0.03, 0.14),
-    "score": ("Checking the image follows the sketch", 30, 0.14, 0.27),
+    "score": ("Checking the images: GPT picks the usable one, then the line match", 35, 0.14, 0.27),
     "prepare": ("Cutting the object out of the chosen image", 2, 0.27, 0.28),
     "shape": ("Building the 3D shape (Hunyuan3D-2)", 40, 0.28, 0.44),
     "check_shape": ("Checking the mesh", 2, 0.44, 0.45),
@@ -126,7 +126,12 @@ def gallery_items(run_dir: Path, manifest: dict) -> list[tuple[str, str]]:
     chosen = manifest.get("chosen_candidate")
     for path in sorted(run_dir.glob("05_candidate_r*_[0-9].png")):
         c = scored.get(path.name)
-        label = "scoring..." if c is None else f"score {c['total']:.2f}" + ("  (chosen)" if path.name == chosen else "")
+        if c is None:
+            label = "checking..."
+        elif c.get("judged") == "rejected" and path.name != chosen:
+            label = "rejected by the image check"
+        else:
+            label = f"score {c['total']:.2f}" + ("  (chosen)" if path.name == chosen else "")
         found.append((path, label))
     if (run_dir / "06_prepared.png").exists():
         found.append((run_dir / "06_prepared.png", "input to 3D"))
@@ -140,8 +145,11 @@ def run_summary(manifest: dict) -> dict:
         "object": intent.get("label"),
         "named_by": intent.get("source"),
         "drawing": intent.get("drawing") or "not judged (no LLM)",
+        "kind": intent.get("kind") or "object",
+        "was_upright": intent.get("up") in (None, "", "top"),
         "prompt_used": intent.get("prompt"),
-        "candidates": [{key: c.get(key) for key in ("round", "control_scale", "total", "scores")}
+        "image_checks": manifest.get("image_checks"),
+        "candidates": [{key: c.get(key) for key in ("round", "control_scale", "judged", "total", "scores")}
                        for c in manifest.get("candidates") or []],
         "result": manifest.get("result"),
         "export": manifest.get("export"),

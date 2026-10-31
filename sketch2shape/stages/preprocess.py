@@ -93,3 +93,19 @@ def preprocess(image, store, cfg, source: str = "upload") -> SketchAsset:
         stroke_ratio=round(float(ratio), 5),
         source=source,
     )
+
+
+# which edge the top of the drawing points to -> counter-clockwise quarter turns that make it upright
+UPRIGHT_TURNS = {"right": 1, "bottom": 2, "left": 3}
+
+
+def turn_upright(sketch: SketchAsset, up: str) -> int:
+    """Rotate the saved line art, control image and mask in place when the naming call found the drawing
+    sideways or upside down (e.g. a phone photo taken sideways). Returns the quarter turns applied."""
+    turns = UPRIGHT_TURNS.get(up, 0)
+    if turns:
+        for path in {sketch.lineart_path, sketch.control_path, sketch.mask_path}:
+            with Image.open(path) as image:
+                turned = image.rotate(90 * turns, expand=True)   # PIL turns counter-clockwise
+            turned.save(path)
+    return turns

@@ -21,14 +21,19 @@ sketch (canvas or upload) + optional description
                   crop and centre, square to 1024 px, close gaps, thicken thin lines, fill a silhouette
   2 understand    name the object: one vision-LLM call if OPENAI_API_KEY (or ANTHROPIC_API_KEY) is set,
                   otherwise CLIP zero-shot over ~170 everyday objects; the same call suggests real colours
-                  and surface (keeping any the user typed) and judges the drawing clean or rough; build the
-                  prompt (a typed description always comes first)
-  3 generate      SDXL + xinsir scribble ControlNet: a photorealistic studio photo that keeps the sketch's
-                  outline (no realism words if the description asks for a style such as cartoon or toy);
-                  a rough doodle gets lighter control for the first 60% of the steps, so it becomes a
-                  real-looking object instead of a copy of the cartoon
-  4 score         gate 1: sketch-line recall vs image edges, silhouette IoU, CLIP agreement
-                  -> below threshold: regenerate with new seeds and stronger conditioning (max 2 rounds)
+                  and surface (keeping any the user typed), judges the drawing clean or rough, says whether
+                  it is one object or a scene, and which way is up (a sideways photo is turned upright);
+                  build the prompt (a typed description always comes first)
+  3 generate      SDXL + xinsir scribble ControlNet: two photorealistic studio photos that keep the
+                  sketch's outline (no realism words if the description asks for a style such as cartoon);
+                  a rough doodle gets lighter control for the first 60% of the steps; a scene is made as
+                  a miniature diorama on a round base, with the sketch only hinting at the layout
+  4 score         gate 1: the vision LLM picks the photo showing one complete real object (or diorama)
+                  alone on a plain background, rejecting frames, rings, scenery, extra objects, cut-off
+                  parts and flat plaques; then sketch-line recall vs image edges, silhouette IoU, CLIP
+                  agreement for the pick -> all rejected: new seeds, the check's words added to the
+                  negative prompt; drifted from the lines: stronger conditioning (max 2 extra rounds).
+                  Without a key: one photo per round and the line scores alone
   5 prepare       background removal (fallback: colour threshold), crop, centre, margin
   6 reconstruct   Hunyuan3D-2: shape (turbo + FlashVDM), floater/degenerate-face clean-up, then texture
   7 validate      gate 2: enough faces, finite, not flat, no loose fragments, texture present
@@ -84,7 +89,7 @@ architecture evaluation is in `docs/Sketch2Shape Architecture Decision.pdf`.
 | [madebyollin/sdxl-vae-fp16-fix](https://huggingface.co/madebyollin/sdxl-vae-fp16-fix) | fp16-safe SDXL VAE | MIT |
 | [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2) (shape turbo + paint) | image to textured 3D, background removal | Tencent Hunyuan community / non-commercial licence |
 | [CLIP ViT-B/32](https://huggingface.co/openai/clip-vit-base-patch32) | naming the object, scoring | MIT |
-| OpenAI API (optional; first available of `gpt-4.1-mini`, `gpt-5-mini`, `gpt-4o-mini`) | naming the object and its shape from the sketch (one call, image sent at low detail, well under a cent) | external service, needs `OPENAI_API_KEY` |
+| OpenAI API (optional; first available of `gpt-4.1-mini`, `gpt-5-mini`, `gpt-4o-mini`) | naming the object and its shape from the sketch, and the image check in gate 1 (about two calls per run, images sent at low detail, well under a cent) | external service, needs `OPENAI_API_KEY` |
 | Claude API (optional alternative, `claude-opus-5-5`) | same, used when only `ANTHROPIC_API_KEY` is set | external service |
 | diffusers, transformers, OpenCV, trimesh, Gradio | libraries | Apache-2.0 / MIT / BSD |
 

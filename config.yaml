@@ -36,7 +36,7 @@ generate:
   controlnet: xinsir/controlnet-scribble-sdxl-1.0
   vae: madebyollin/sdxl-vae-fp16-fix
   control_polarity: bw        # bw = black lines on white; the Kaggle trial showed both polarities work
-  candidates: 1               # 1 image per round; the fidelity gate regenerates if it scores low (2 = best-of-2, ~60 s slower)
+  candidates: 2               # images per round; the vision-LLM check picks one (1 without an LLM key: no check)
   size: 768                   # Hunyuan3D-2 works from ~512 px, so 1024 mostly cost time
   steps: 20
   guidance_scale: 6.0
@@ -45,16 +45,21 @@ generate:
   max_control_scale: 1.0
   seed: 42
   # "real volume" and the flat-object negatives stop outline sketches (e.g. a cartoon cat) becoming flat plaques;
+  # the frame and scenery negatives stop a drawn outline becoming a ring around the object or a scene behind it;
   # the reflection negatives keep glossy highlights from being baked into the texture. Each prompt must stay
-  # within CLIP's 77 tokens (SDXL drops the rest): the longest LLM-built prompt is ~72-75, the negative 69.
-  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, studio photo, plain white background, soft even lighting, high detail"
-  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, clutter, blurry, sketch, drawing, hands, people, liquid, flat, 2D, relief, embossed, plaque, cookie cutter, sticker, coin, badge, glossy, reflections, specular highlights"
+  # within CLIP's 77 tokens (SDXL drops the rest), with room for the image check's "avoid" words in front.
+  prompt_suffix: "single three-dimensional object with real volume, plain white background, centered, entire object visible, studio photo, soft even lighting, high detail"
+  negative_prompt: "multiple objects, cropped, picture frame, border, scenery, text, watermark, cast shadow, ground, blurry, sketch, drawing, hands, people, flat, 2D, relief, plaque, cookie cutter, sticker, glossy, reflections, specular highlights"
   realism:                    # added unless a typed description asks for a style (cartoon, toy, low poly, ...)
     prompt: "photorealistic, realistic proportions, natural colours and textures"
     negative_prompt: "3d render, cartoon, figurine"
   rough:                      # the LLM naming call judged the sketch a quick or cartoon-style doodle (never without a key)
-    control_scale: 0.55       # first round only; if the fidelity gate rejects the image, retries follow the lines fully
+    control_scale: 0.55       # until an image drifts from the lines; then retries follow them fully
     control_end: 0.6          # the sketch guides the first 60% of the steps (layout, silhouette), then the model is free
+  scene:                      # the naming call saw a landscape or several things: made as a miniature diorama
+    control_scale: 0.3        # a scene's lines do not fit one object, so the sketch only hints at the layout
+    control_end: 0.4
+    negative_prompt: "cropped, picture frame, border, sky, landscape background, text, watermark, cast shadow, blurry, sketch, drawing, people, flat, 2D, relief, plaque, sticker, glossy, reflections, specular highlights"
 
 score:
   threshold: 0.35             # calibrate

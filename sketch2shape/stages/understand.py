@@ -1,17 +1,15 @@
 """Stage 2: name the sketched object and build the image-generation prompt.
 
-With an LLM API key set, one vision call names the object and notes its visible shape features:
-OpenAI when OPENAI_API_KEY is set, otherwise Claude when ANTHROPIC_API_KEY is set (config can force
-either). Without a key, or on any API error or refusal, CLIP picks a name from a fixed list instead, so
-the pipeline never depends on a key. A typed user prompt always wins over the guessed name; the call
-sees it, so its colour and material suggestion keeps what the user asked for. The prompt asks for a
-photorealistic object unless the typed description asks for a style such as a cartoon or a toy.
+With an LLM API key set, one vision call (sketch2shape/llm.py) names the object, notes its shape, a
+plausible real colour and surface, whether the drawing is clean or rough, whether it shows one object
+or a whole scene, and which way is up. Without a key, or on any API error or refusal, CLIP picks a name
+from a fixed list instead, so the pipeline never depends on a key. A typed user prompt always wins over
+the guessed name; the call sees it, so its colour and material suggestion keeps what the user asked for.
+The prompt asks for a photorealistic object unless the typed description asks for a style such as a
+cartoon or a toy. A scene (a landscape, several separate things) is made as a miniature diorama.
 """
 from __future__ import annotations
 
-import base64
-import json
-import os
 import re
 from pathlib import Path
 
@@ -19,19 +17,27 @@ import numpy as np
 from PIL import Image
 
 from ..contracts import Intent
+from ..llm import ask, parse_json
 from ..vocab import OBJECTS
 
 NAMING_PROMPT = (
-    "This is a hand-drawn sketch of one object that will be turned into a realistic 3D model. "
+    "This is a hand-drawn sketch that will be turned into a realistic 3D model. "
     "Name the object in one to three plain words, for example 'coffee mug', 'armchair' or 'sports car'. "
     "In details, list at most 10 words about the real object's shape and pose as the sketch shows it, for "
     "example 'tall tapered body, round handle on the right'; describe the object, not the drawing style. "
     "In material, give at most 8 words on the real colours, pattern and surface it would most plausibly have "
     "in real life, for example 'white glazed ceramic', 'brushed steel and black rubber' or 'orange tabby "
-    "fur, white chest'. "
+    "fur, white chest'. Shaded or hatched areas are dark colours or materials: say so in material (for "
+    "example 'black pentagon panels'), never treat them as texture, grooves or a rim. "
     "In drawing, answer 'clean' if the lines already show the real object's true shape and proportions, or "
     "'rough' if it is a quick, wobbly, childlike or cartoon-style doodle (odd proportions, a smiley face, "
-    "lumpy outlines) that the real object should not copy line for line. Set confidence between 0 and 1."
+    "lumpy outlines) that the real object should not copy line for line. "
+    "In kind, answer 'object' if the sketch shows one thing, or 'scene' if it shows a landscape or a view "
+    "with several separate things (for example hills, trees and a house); for a scene, name the whole view "
+    "in object (for example 'mountain valley with a cabin') and list its main parts in details. "
+    "In up, say which edge of the image the top of the drawing points to: 'top' if it is upright or has no "
+    "clear up direction (like a ball), otherwise 'right', 'bottom' or 'left' (a photo taken sideways or "
+    "upside down). Set confidence between 0 and 1."
 )
 
 NAMING_SCHEMA = {
@@ -41,18 +47,20 @@ NAMING_SCHEMA = {
         "details": {"type": "string"},
         "material": {"type": "string"},
         "drawing": {"type": "string", "enum": ["clean", "rough"]},
+        "kind": {"type": "string", "enum": ["object", "scene"]},
+        "up": {"type": "string", "enum": ["top", "right", "bottom", "left"]},
         "confidence": {"type": "number"},
     },
-    "required": ["object", "details", "material", "drawing", "confidence"],
+    "required": ["object", "details", "material", "drawing", "kind", "up", "confidence"],
     "additionalProperties": False,
 }
-
 
 USER_TEXT = (" The user also typed this description: \"{}\". In material, keep every colour, material or "
              "style it names and only fill in what it leaves open.")
 
 JSON_REPLY = (" Reply only with a JSON object with the keys object (string), details (string), "
-              "material (string), drawing ('clean' or 'rough') and confidence (number).")
+              "material (string), drawing ('clean' or 'rough'), kind ('object' or 'scene'), up ('top', "
+              "'right', 'bottom' or 'left') and confidence (number).")
 
 # A typed description asking for one of these looks turns the realism words off.
 STYLE_WORDS = re.compile(r"\b(cartoon\w*|anime|chibi|toys?|figurines?|statues?|sculptures?|lego|origami|"
@@ -70,130 +78,34 @@ def realistic(user_prompt: str) -> bool:
 
 def parse_naming(text: str) -> dict | None:
     """The naming answer from a model's JSON reply, or None if it holds no usable name."""
-    match = re.search(r"\{.*\}", text or "", re.S)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    name = str(data.get("object", "")).strip().lower()
+    data = parse_json(text)
+    name = str((data or {}).get("object", "")).strip().lower()
     if not name:
         return None
     try:
         confidence = float(data.get("confidence", 0.5))
     except (TypeError, ValueError):
         confidence = 0.5
-    drawing = str(data.get("drawing", "")).strip().lower()
+
+    def choice(key: str, allowed: tuple, default: str = "") -> str:
+        value = str(data.get(key, "")).strip().lower()
+        return value if value in allowed else default
+
     return {"label": name, "details": str(data.get("details", "")).strip(),
             "material": str(data.get("material", "")).strip()[:60],
-            "drawing": drawing if drawing in ("clean", "rough") else "", "confidence": confidence}
+            "drawing": choice("drawing", ("clean", "rough")), "kind": choice("kind", ("object", "scene")),
+            "up": choice("up", ("top", "right", "bottom", "left"), "top"), "confidence": confidence}
 
 
 def name_with_llm(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
-    """Pick the provider from config and the keys present. Returns (result or None, note for the run log)."""
-    llm = cfg.understand.llm
-    if not llm.enabled:
-        return None, ""
-    provider = llm.provider
-    if provider == "auto":
-        provider = ("openai" if os.environ.get("OPENAI_API_KEY")
-                    else "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None)
-    if provider == "openai":
-        return openai_name(image_path, cfg, user_prompt)
-    if provider == "anthropic":
-        return claude_name(image_path, cfg, user_prompt)
-    return None, "No LLM API key set (OPENAI_API_KEY or ANTHROPIC_API_KEY); using CLIP instead."
-
-
-def openai_name(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
-    """Ask an OpenAI vision model what the sketch shows, trying the configured models in order."""
-    llm = cfg.understand.llm
-    if not os.environ.get("OPENAI_API_KEY"):
-        return None, "No OPENAI_API_KEY set; using CLIP instead."
-    try:
-        import openai
-    except ImportError:
-        return None, "The openai package is not installed; using CLIP instead."
-
-    client = openai.OpenAI(timeout=float(llm.timeout_s), max_retries=1)
-    image_url = "data:image/png;base64," + base64.standard_b64encode(Path(image_path).read_bytes()).decode()
-    messages = [{"role": "user", "content": [
-        {"type": "text", "text": naming_text(user_prompt) + JSON_REPLY},
-        {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}},   # low detail: cheap, enough for a sketch
-    ]}]
-    skipped = []
-    for model in llm.openai_models:
-        try:
-            response = client.chat.completions.create(model=model, messages=messages,
-                                                      response_format={"type": "json_object"})
-        except (openai.NotFoundError, openai.BadRequestError, openai.PermissionDeniedError) as exc:
-            skipped.append(f"{model}: {type(exc).__name__}")       # model not available to this key: try the next
-            continue
-        except openai.AuthenticationError:
-            return None, "OpenAI rejected the API key; using CLIP instead."
-        except openai.RateLimitError:
-            return None, "OpenAI rate limit or quota reached; using CLIP instead."
-        except openai.APIConnectionError:
-            return None, "Could not reach the OpenAI API; using CLIP instead."
-        except openai.APIStatusError as exc:
-            return None, f"OpenAI API error {exc.status_code}; using CLIP instead."
-        named = parse_naming(response.choices[0].message.content)
-        if not named:
-            return None, f"{model} gave no usable name; using CLIP instead."
-        named["source"] = f"openai:{model}"
-        return named, ""
-    return None, f"No configured OpenAI model was usable ({'; '.join(skipped)}); using CLIP instead."
-
-
-def claude_name(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
-    """Ask Claude what the sketch shows. Returns (result or None, note for the run log)."""
-    llm = cfg.understand.llm
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None, "No ANTHROPIC_API_KEY set; using CLIP instead."
-    try:
-        import anthropic
-    except ImportError:
-        return None, "The anthropic package is not installed; using CLIP instead."
-
-    client = anthropic.Anthropic(timeout=float(llm.timeout_s), max_retries=1)
-    image_data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("utf-8")
-    request = dict(
-        model=llm.anthropic_model,
-        max_tokens=4096,
-        output_config={"effort": llm.effort, "format": {"type": "json_schema", "schema": NAMING_SCHEMA}},
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_data}},
-                {"type": "text", "text": naming_text(user_prompt)},
-            ],
-        }],
-    )
-    try:
-        if llm.server_fallback:
-            response = client.beta.messages.create(
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **request)
-        else:
-            response = client.messages.create(**request)
-    except anthropic.RateLimitError:
-        return None, "Claude rate limit reached; using CLIP instead."
-    except anthropic.APIStatusError as exc:
-        return None, f"Claude API error {exc.status_code}; using CLIP instead."
-    except anthropic.APIConnectionError:
-        return None, "Could not reach the Claude API; using CLIP instead."
-    except Exception as exc:  # e.g. an older SDK without these parameters
-        return None, f"Claude call failed ({exc!r}); using CLIP instead."
-
-    if response.stop_reason == "refusal":
-        return None, "Claude declined to name the sketch; using CLIP instead."
-    text = next((block.text for block in response.content if block.type == "text"), None)
-    if not text:
-        return None, "Claude returned no text; using CLIP instead."
+    """Ask the vision LLM what the sketch shows. Returns (result or None, note for the run log)."""
+    text, source, note = ask([naming_text(user_prompt) + JSON_REPLY, Path(image_path)], cfg, NAMING_SCHEMA)
+    if text is None:
+        return None, f"{note}; using CLIP instead." if note else ""
     named = parse_naming(text)
     if not named:
-        return None, "Claude gave no usable name; using CLIP instead."
-    named["source"] = f"anthropic:{llm.anthropic_model}"
+        return None, f"{source} gave no usable name; using CLIP instead."
+    named["source"] = source
     return named, ""
 
 
@@ -218,7 +130,8 @@ def with_article(noun: str) -> str:
     return f"{'an' if noun[:1] in 'aeiou' else 'a'} {noun}"
 
 
-def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "") -> str:
+def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "",
+                 kind: str = "") -> str:
     g = cfg.generate
     if user_prompt:                         # the user's words come first; the naming call kept their colours
         subject = user_prompt
@@ -227,9 +140,13 @@ def build_prompt(label: str | None, details: str, user_prompt: str, cfg, materia
         if material and material.lower() not in user_prompt.lower():
             subject += f", {material}"
     elif label:
-        subject = with_article(label) + "".join(f", {part}" for part in (material, details) if part)
+        # a scene's parts are many words; its name and colours are enough next to the sketch
+        parts = (material,) if kind == "scene" else (material, details)
+        subject = with_article(label) + "".join(f", {part}" for part in parts if part)
     else:
         subject = "a single everyday object"
+    if kind == "scene":                     # a landscape is not one object: build it as a diorama
+        subject = f"a miniature diorama of {subject}, on a small round base"
     realism = f"{g.realism.prompt}, " if realistic(user_prompt) else ""
     return f"{subject}, {realism}{g.prompt_suffix}"
 
@@ -238,10 +155,10 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
     named, note = name_with_llm(sketch.lineart_path, cfg, user_prompt)
     if note:
         store.warn(note)
-    material, drawing = "", ""
+    material, drawing, kind, up = "", "", "", ""
     if named:
         label, details, confidence, source = named["label"], named["details"], named["confidence"], named["source"]
-        material, drawing = named.get("material", ""), named.get("drawing", "")
+        material, drawing, kind, up = named["material"], named["drawing"], named["kind"], named["up"]
     else:
         lineart = Image.open(sketch.lineart_path).convert("RGB")
         probs = clip_zero_shot(models, [lineart], OBJECTS, "a black and white sketch of {}")[0]
@@ -251,11 +168,12 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
             label, source = OBJECTS[best], "clip"
         else:
             label, source = None, "none"
-    negative_prompt = cfg.generate.negative_prompt
+    g = cfg.generate
+    negative_prompt = g.scene.negative_prompt if kind == "scene" else g.negative_prompt
     if realistic(user_prompt):
-        negative_prompt += f", {cfg.generate.realism.negative_prompt}"
+        negative_prompt += f", {g.realism.negative_prompt}"
     return Intent(
         label=label, confidence=round(confidence, 3), source=source,
-        prompt=build_prompt(label, details, user_prompt, cfg, material),
-        negative_prompt=negative_prompt, details=details, drawing=drawing,
+        prompt=build_prompt(label, details, user_prompt, cfg, material, kind),
+        negative_prompt=negative_prompt, details=details, drawing=drawing, kind=kind, up=up,
     )
