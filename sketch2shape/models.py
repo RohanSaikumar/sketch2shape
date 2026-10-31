@@ -35,7 +35,9 @@ class ModelManager:
     # --------------------------------------------------------- GPU workers
 
     def gpu_index(self, role: str) -> int:
-        return int(getattr(self.cfg.gpus, role))
+        """The configured GPU for this role, or GPU 0 when the machine has fewer GPUs (e.g. one P100)."""
+        index = int(getattr(self.cfg.gpus, role))
+        return index if index < gpu_count() else 0
 
     def run_worker(self, task: str, role: str, store, **job) -> dict:
         """Run one job in a fresh process on the GPU for `role` ("sdxl" or "hunyuan") and return its result."""
@@ -82,6 +84,21 @@ class ModelManager:
 
     def free_memory(self) -> None:
         gc.collect()
+
+
+_GPU_COUNT = None
+
+
+def gpu_count() -> int:
+    """Number of NVIDIA GPUs, from nvidia-smi so this process never opens a CUDA context."""
+    global _GPU_COUNT
+    if _GPU_COUNT is None:
+        try:
+            out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30).stdout
+            _GPU_COUNT = sum(line.startswith("GPU ") for line in out.splitlines())
+        except (OSError, subprocess.SubprocessError):
+            _GPU_COUNT = 0
+    return _GPU_COUNT
 
 
 def kill_group(proc: subprocess.Popen) -> None:

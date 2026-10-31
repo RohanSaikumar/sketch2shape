@@ -9,7 +9,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HY_DIR="${HY_DIR:-/tmp/Hunyuan3D-2}"
 HY_REF="${HY_REF:-f8db630}"         # Hunyuan3D-2 commit tested on Kaggle, 31 Oct 2026
 WHEELS_DIR="${WHEELS_DIR:-/kaggle/working/wheels}"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5}"   # 7.5 = T4; e.g. 8.6 for RTX 30xx, 8.9 for RTX 40xx
+# Compile the CUDA extensions for the GPUs actually present (7.5 = T4, 8.6 = RTX 30xx, 8.9 = RTX 40xx).
+if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
+  TORCH_CUDA_ARCH_LIST="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sort -u | paste -sd ';' - || true)"
+fi
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.5}"
+echo "== Building for CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 
 if [ ! -d "$HY_DIR/.git" ]; then
   echo "== Cloning Hunyuan3D-2 ($HY_REF)"
