@@ -89,7 +89,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sketch2Shape web app")
     parser.add_argument("--share", action="store_true", help="create a public gradio.live link")
     parser.add_argument("--config", help="path to a config.yaml")
-    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--port", type=int, default=None, help="default: the first free port from 7860")
     args = parser.parse_args()
     cfg = load_config(args.config)
     runs = Path(cfg.runs_dir).resolve()
