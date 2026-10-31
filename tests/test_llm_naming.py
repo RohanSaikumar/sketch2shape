@@ -12,7 +12,8 @@ from sketch2shape.contracts import SketchAsset
 from sketch2shape.runstore import RunStore
 from sketch2shape.stages.understand import name_with_llm, parse_naming, understand
 
-GOOD = '{"object": "Headphones", "details": "arched band, two round ear cups", "confidence": 0.9}'
+GOOD = ('{"object": "Headphones", "details": "arched band, two round ear cups", '
+        '"material": "matte black plastic", "confidence": 0.9}')
 
 
 def fake_openai(behaviour: dict) -> types.ModuleType:
@@ -98,7 +99,11 @@ def test_understand_uses_the_llm_name_in_the_prompt(cfg, sketch_png, monkeypatch
     sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
     intent = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
     assert intent.source == "openai:model-a" and intent.label == "headphones"
-    assert intent.prompt.startswith("a headphones, arched band, two round ear cups")
+    assert intent.prompt.startswith("a headphones, matte black plastic, arched band, two round ear cups")
+    # a typed description decides appearance: the LLM's material suggestion is not added
+    typed = understand(models=None, sketch=sketch, user_prompt="red leather headphones", cfg=cfg,
+                       store=RunStore(tmp_path / "r2"))
+    assert "matte black plastic" not in typed.prompt and typed.prompt.startswith("red leather headphones")
 
 
 def test_parse_naming_accepts_fenced_json():

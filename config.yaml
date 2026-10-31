@@ -39,9 +39,10 @@ generate:
   control_scale_step: 0.1
   max_control_scale: 1.0
   seed: 42
-  # "real volume" and the flat-object negatives stop outline sketches (e.g. a cartoon cat) becoming flat plaques
-  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, product photo, plain white background, soft even studio lighting, high detail"
-  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid, flat, 2D, relief, embossed, engraved, plaque, cookie cutter, sticker, coin, badge"
+  # "real volume" and the flat-object negatives stop outline sketches (e.g. a cartoon cat) becoming flat plaques;
+  # "matte finish" and the reflection negatives keep glossy highlights from being baked into the texture
+  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, product photo, plain white background, soft even studio lighting, matte finish, high detail"
+  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid, flat, 2D, relief, embossed, engraved, plaque, cookie cutter, sticker, coin, badge, glossy, reflections, specular highlights"
 
 score:
   threshold: 0.35             # calibrate

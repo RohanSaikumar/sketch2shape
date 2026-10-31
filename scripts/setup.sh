@@ -57,4 +57,7 @@ EOF
 echo "== Installing Sketch2Shape requirements"
 pip install -q -r "$ROOT/requirements.txt"
 
+echo "== Downloading model weights now, so the first run doesn't wait (several minutes the first time)"
+python "$ROOT/scripts/prefetch_weights.py" || echo "== Prefetch incomplete; missing models download on first use"
+
 python -c "from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline; from hy3dgen.texgen import Hunyuan3DPaintPipeline; print('== Ready: Hunyuan3D-2 shape and texture import OK')"
