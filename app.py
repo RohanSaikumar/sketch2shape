@@ -25,13 +25,13 @@ from sketch2shape.models import relaunch_with_lean_malloc, stop_leftover_workers
 # step: (what the viewer is told, usual seconds on Kaggle's T4s, progress at start, progress at end)
 STEPS = {
     "preprocess": ("Cleaning up the sketch", 2, 0.00, 0.02),
-    "understand": ("Working out what the object is", 10, 0.02, 0.05),
-    "generate": ("Generating product-style images that follow your lines (SDXL)", 110, 0.05, 0.35),
-    "score": ("Checking which image follows the sketch best", 20, 0.35, 0.40),
-    "prepare": ("Cutting the object out of the chosen image", 5, 0.40, 0.42),
-    "shape": ("Building the 3D shape (Hunyuan3D-2)", 85, 0.42, 0.65),
-    "check_shape": ("Checking the mesh", 5, 0.65, 0.67),
-    "texture": ("Painting the texture (Hunyuan3D-2)", 115, 0.67, 0.95),
+    "understand": ("Working out what the object is", 5, 0.02, 0.04),
+    "generate": ("Generating a product-style image that follows your lines (SDXL)", 80, 0.04, 0.28),
+    "score": ("Checking the image follows the sketch", 35, 0.28, 0.38),
+    "prepare": ("Cutting the object out of the chosen image", 5, 0.38, 0.40),
+    "shape": ("Building the 3D shape (Hunyuan3D-2)", 95, 0.40, 0.64),
+    "check_shape": ("Checking the mesh", 5, 0.64, 0.66),
+    "texture": ("Painting the texture (Hunyuan3D-2)", 130, 0.66, 0.95),
     "check_texture": ("Checking the texture", 5, 0.95, 0.97),
     "export": ("Saving the GLB and OBJ files", 5, 0.97, 1.00),
 }

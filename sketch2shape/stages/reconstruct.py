@@ -21,6 +21,7 @@ def make_shape(models, prepared, seed: int, store, cfg) -> trimesh.Trimesh:
     out = store.path(f"07_shape_seed{seed}.glb")
     models.run_worker("shape", "hunyuan", store, model=r.model, subfolder=r.shape_subfolder,
                       steps=int(r.shape_steps), flashvdm=bool(r.flashvdm),
+                      octree_resolution=int(r.octree_resolution),
                       image=str(prepared.rgba_path), seed=int(seed), out=str(out))
     return as_trimesh(trimesh.load(out, force="scene"))
 

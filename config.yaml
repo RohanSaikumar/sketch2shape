@@ -31,16 +31,17 @@ generate:
   controlnet: xinsir/controlnet-scribble-sdxl-1.0
   vae: madebyollin/sdxl-vae-fp16-fix
   control_polarity: bw        # bw = black lines on white; the Kaggle trial showed both polarities work
-  candidates: 2               # 2 images take about 62-69 s on a T4; use 1 to roughly halve that
-  size: 1024
-  steps: 25
+  candidates: 1               # 1 image per round; the fidelity gate regenerates if it scores low (2 = best-of-2, ~60 s slower)
+  size: 768                   # Hunyuan3D-2 works from ~512 px, so 1024 mostly cost time
+  steps: 20
   guidance_scale: 6.0
   control_scale: 0.7
   control_scale_step: 0.1
   max_control_scale: 1.0
   seed: 42
-  prompt_suffix: "single object, centered, whole object in frame, product photo, plain white background, soft even studio lighting, high detail"
-  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid"
+  # "real volume" and the flat-object negatives stop outline sketches (e.g. a cartoon cat) becoming flat plaques
+  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, product photo, plain white background, soft even studio lighting, high detail"
+  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid, flat, 2D, relief, embossed, engraved, plaque, cookie cutter, sticker, coin, badge"
 
 score:
   threshold: 0.35             # calibrate
@@ -58,6 +59,7 @@ reconstruct:
   model: tencent/Hunyuan3D-2
   shape_subfolder: hunyuan3d-dit-v2-0-turbo
   shape_steps: 5
+  octree_resolution: 256      # marching-cubes grid; 380 is Hunyuan's default, but the mesh is reduced to 40k faces anyway
   flashvdm: true
   seed: 1234
   max_shape_attempts: 2

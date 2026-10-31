@@ -102,6 +102,7 @@ def task_shape(job: dict) -> dict:
 
     started = time.time()
     mesh = pipe(image=Image.open(job["image"]).convert("RGBA"), num_inference_steps=steps,
+                octree_resolution=int(job.get("octree_resolution", 380)),
                 generator=torch.manual_seed(int(job["seed"])))[0]
     for step in (FloaterRemover(), DegenerateFaceRemover(), FaceReducer()):
         mesh = step(mesh)
