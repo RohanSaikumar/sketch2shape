@@ -37,8 +37,8 @@ generate:
   vae: madebyollin/sdxl-vae-fp16-fix
   control_polarity: bw        # bw = black lines on white; the Kaggle trial showed both polarities work
   candidates: 2               # images per round; the vision-LLM check picks one (1 without an LLM key: no check)
-  size: 768                   # Hunyuan3D-2 works from ~512 px, so 1024 mostly cost time
-  steps: 20
+  size: 1024                  # SDXL's native size: 768 px saved ~10 s but gave simpler, softer images
+  steps: 25
   guidance_scale: 6.0
   control_scale: 0.7
   control_scale_step: 0.1
@@ -77,12 +77,13 @@ reconstruct:
   model: tencent/Hunyuan3D-2
   shape_subfolder: hunyuan3d-dit-v2-0-turbo
   shape_steps: 5
-  octree_resolution: 256      # marching-cubes grid; 380 is Hunyuan's default, but the mesh is reduced to 40k faces anyway
+  octree_resolution: 380      # marching-cubes grid (Hunyuan's default); 256 saved a few seconds but lost fine detail
   flashvdm: true
   seed: 1234
   max_shape_attempts: 2
   texture: true
   paint_cpu_offload_on_oom: true
+  paint_delight: true         # Hunyuan's light-removal step before texturing (scripts/compare_settings.py --paint tests it)
 
 validate:
   min_faces: 500

@@ -185,15 +185,24 @@ def run_paint(pipe, job: dict) -> dict:
     _reset_peak()
     image = Image.open(job["image"]).convert("RGBA")
     mode = "hunyuan paint"
+    models = getattr(pipe, "models", None)
+    delight = models.get("delight_model") if isinstance(models, dict) else None
+    if delight is not None and not job.get("delight", True):
+        models["delight_model"] = lambda picture: picture          # skip the light-removal step
+        mode += " (no delight)"
     try:
-        textured = pipe(trimesh.load(job["mesh"], force="mesh"), image=image)
-    except torch.cuda.OutOfMemoryError:
-        if not job["cpu_offload_on_oom"]:
-            raise
-        torch.cuda.empty_cache()
-        pipe.enable_model_cpu_offload()
-        textured = pipe(trimesh.load(job["mesh"], force="mesh"), image=image)
-        mode = "hunyuan paint (CPU offload)"
+        try:
+            textured = pipe(trimesh.load(job["mesh"], force="mesh"), image=image)
+        except torch.cuda.OutOfMemoryError:
+            if not job["cpu_offload_on_oom"]:
+                raise
+            torch.cuda.empty_cache()
+            pipe.enable_model_cpu_offload()
+            textured = pipe(trimesh.load(job["mesh"], force="mesh"), image=image)
+            mode += " (CPU offload)"
+    finally:
+        if delight is not None:
+            models["delight_model"] = delight                      # a kept worker's next job gets it back
     save_atomically(job["out"], textured.export)
     return {"mode": mode, "peak_gb": _peak_gb()}
 

@@ -1,6 +1,6 @@
 """Gradio app: draw or upload a sketch, add an optional description, get a textured 3D model.
 
-While a model is being made, a progress panel pinned to the top of the page shows what is happening
+While a model is being made, a progress panel at the top of the page shows what is happening
 right now: a bar weighted by how long each step takes, the current step with its elapsed and usual
 time, and the finished steps. Each intermediate result appears as soon as it exists (cleaned sketch,
 candidate image with its score, cut-out, then the untextured 3D shape, which can be rotated while the
@@ -48,8 +48,7 @@ STEPS = {
 
 # Keeps the progress panel in view while the page scrolls. Older Gradio takes css in Blocks(), 6.x in launch().
 CSS = """
-.gradio-container { overflow: visible !important; }  /* 'hidden' here disables sticky positioning */
-#s2s-status { position: sticky; top: 0; z-index: 100; background: var(--background-fill-primary); padding-bottom: 6px; }
+#s2s-status { padding-bottom: 6px; }
 """
 BLOCKS_TAKES_CSS = "css" in inspect.signature(gr.Blocks.__init__).parameters
 
@@ -106,7 +105,11 @@ def thumbnail(path: Path, size: int = 384) -> str | None:
     """A small JPEG of an intermediate image (~25 KB instead of ~1 MB), so the live view works on slow links.
     Returns None if the image cannot be read yet (e.g. still being written); the next refresh retries."""
     target = path.parent / "thumbs" / (path.stem + ".jpg")
-    if not target.exists():
+    try:                                    # remade when the image changed (e.g. a sideways sketch was turned)
+        stale = not target.exists() or target.stat().st_mtime < path.stat().st_mtime
+    except OSError:
+        return None
+    if stale:
         try:
             image = Image.open(path).convert("RGBA")
         except (OSError, SyntaxError, ValueError):
@@ -182,9 +185,9 @@ def past_runs(runs_dir: Path) -> list[tuple[str, str]]:
 
 
 def show_past_run(runs_dir: Path, run_name: str | None):
-    """Model, images and downloads of an earlier run."""
+    """Model, downloads, images and run details of an earlier run."""
     if not run_name:
-        return None, None, []
+        return None, None, [], None
     run_dir = Path(runs_dir) / run_name
     try:
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -192,7 +195,8 @@ def show_past_run(runs_dir: Path, run_name: str | None):
         manifest = {}
     files = [str(p) for p in (run_dir / "model.glb", run_dir / "model_obj.zip") if p.exists()]
     glb = run_dir / "model.glb"
-    return (str(glb) if glb.exists() else None), (files or None), gallery_items(run_dir, manifest)
+    return ((str(glb) if glb.exists() else None), (files or None), gallery_items(run_dir, manifest),
+            run_summary(manifest))
 
 
 def has_strokes(canvas) -> bool:
@@ -366,6 +370,7 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                 old_viewer = gr.Model3D(label="Earlier model (drag to rotate)", clear_color=(1, 1, 1, 1), height=360)
                 old_files = gr.File(label="Its downloads", file_count="multiple")
             old_gallery = gr.Gallery(label="Its steps", columns=5, height=200)
+            old_details = gr.JSON(label="Its run details")
 
         def cancel_run():
             with BUSY_LOCK:
@@ -397,7 +402,8 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
         demo.load(lambda: gr.update(interactive=run_in_progress()), None, stop, queue=False)
         demo.load(refresh_models_line, None, [loaded, timer], queue=False)
         refresh.click(lambda: gr.update(choices=past_runs(runs_dir)), None, history, queue=False)
-        history.change(lambda name: show_past_run(runs_dir, name), history, [old_viewer, old_files, old_gallery],
+        history.change(lambda name: show_past_run(runs_dir, name), history,
+                       [old_viewer, old_files, old_gallery, old_details],
                        queue=False)
     return demo
 

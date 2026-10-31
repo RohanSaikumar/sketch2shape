@@ -39,7 +39,7 @@ def paint_mesh(models, mesh, prepared, store, cfg):
     out = store.path("09_textured.glb")
     result = models.run_worker("paint", "hunyuan", store, model=r.model, mesh=str(shape_path),
                                image=str(prepared.rgba_path), out=str(out),
-                               cpu_offload_on_oom=bool(r.paint_cpu_offload_on_oom))
+                               cpu_offload_on_oom=bool(r.paint_cpu_offload_on_oom), delight=bool(r.paint_delight))
     return as_trimesh(trimesh.load(out, force="scene")), result["mode"]
 
 

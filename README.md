@@ -120,7 +120,9 @@ Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
 App runs on 1 Nov 2026 (one image at 768 px, 20 steps): SDXL 14 s, shape 19-21 s, texture 41-49 s of
 work; loading 41 s / 64-66 s / 70-72 s, plus ~15 s to start each worker process; scoring on the CPU
 30-60 s. The worker table in each run's `manifest.json` shows how each model was used
-(`kept loaded`, `loaded early` or `fresh`) and how long the run waited for it.
+(`kept loaded`, `loaded early` or `fresh`) and how long the run waited for it. Image size and steps are
+back at 1024 px / 25 steps and the shape grid at 380 since then: the smaller settings saved ~20 s but
+gave simpler images and shapes, and keeping models loaded saves far more.
 
 ## Setup and running
 
@@ -147,8 +149,15 @@ PyTorch with CUDA must already be installed. `scripts/setup.sh` clones Hunyuan3D
 ```bash
 python -m sketch2shape.cli sketch.png --prompt "a red ceramic mug" [--candidates 1] [--no-texture]
 python scripts/eval_batch.py examples/sketches --prompts examples/prompts.json --out results
+python scripts/compare_settings.py --last 3 --paint   # A/B of image settings on real sketches (stop the app first)
 python -m pytest -q tests          # offline tests, no GPU needed
 ```
+
+`compare_settings.py` cleans up and names each sketch once, then makes two images per variant with the
+same seeds (the 1 Nov morning settings, the current ones, a product-photo look, no GPT colours, firmer
+sketch control), marks the image check's verdicts and saves one sheet per sketch. It also labels each
+input as a paper photo, a rough doodle or a clean drawing, so settings can be tuned per kind of input.
+`--paint` also textures the first sketch's 3D shape with and without Hunyuan's light-removal step.
 
 ## Inputs and outputs
 
