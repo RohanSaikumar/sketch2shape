@@ -86,14 +86,14 @@ Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
 
 ### On Kaggle (free, recommended)
 
-1. Create a notebook from `notebooks/kaggle_run.ipynb` (File, Import Notebook).
+1. Create a notebook from `notebooks/kaggle_run.ipynb` (File, Import Notebook). It clones https://github.com/RohanSaikumar/sketch2shape.
 2. Session options: Accelerator **GPU T4 x2**, Internet **On**. Optionally add `ANTHROPIC_API_KEY` and `HF_TOKEN` as secrets.
-3. Set `REPO_URL` in the first cell and Run All. It runs setup, the offline tests, one example, then the app with a public link.
+3. Run All (change `REPO_URL` in the first cell only for a fork). It runs setup, the offline tests, one example, then the app with a public link.
 
 ### On a Linux machine with an NVIDIA GPU
 
 ```bash
-git clone <this repo> sketch2shape && cd sketch2shape
+git clone https://github.com/RohanSaikumar/sketch2shape.git && cd sketch2shape
 TORCH_CUDA_ARCH_LIST=8.9 bash scripts/setup.sh      # use your GPU's compute capability
 python app.py                                        # web app on http://localhost:7860
 python -m sketch2shape.cli examples/sketches/mug.png --prompt "a white ceramic coffee mug"
