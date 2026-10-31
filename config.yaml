@@ -40,14 +40,16 @@ generate:
   max_control_scale: 1.0
   seed: 42
   # "real volume" and the flat-object negatives stop outline sketches (e.g. a cartoon cat) becoming flat plaques;
-  # "matte finish" and the reflection negatives keep glossy highlights from being baked into the texture
-  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, product photo, plain white background, soft even studio lighting, matte finish, high detail"
-  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid, flat, 2D, relief, embossed, engraved, plaque, cookie cutter, sticker, coin, badge, glossy, reflections, specular highlights"
+  # the reflection negatives keep glossy highlights from being baked into the texture. Each prompt must stay
+  # within CLIP's 77 tokens (SDXL drops the rest): the longest LLM-built prompt is ~72-75, the negative 69.
+  prompt_suffix: "single three-dimensional object with real volume, centered, whole object in frame, studio photo, plain white background, soft even lighting, high detail"
+  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, clutter, blurry, sketch, drawing, hands, people, liquid, flat, 2D, relief, embossed, plaque, cookie cutter, sticker, coin, badge, glossy, reflections, specular highlights"
+  realism:                    # added unless a typed description asks for a style (cartoon, toy, low poly, ...)
+    prompt: "photorealistic, realistic proportions, natural colours and textures"
+    negative_prompt: "3d render, cartoon, figurine"
   rough:                      # the LLM naming call judged the sketch a quick or cartoon-style doodle (never without a key)
     control_scale: 0.55       # first round only; if the fidelity gate rejects the image, retries follow the lines fully
     control_end: 0.6          # the sketch guides the first 60% of the steps (layout, silhouette), then the model is free
-    prompt: "photorealistic, lifelike, realistic proportions"   # added when there is no typed description
-    negative_prompt: "cartoon, figurine"
 
 score:
   threshold: 0.35             # calibrate

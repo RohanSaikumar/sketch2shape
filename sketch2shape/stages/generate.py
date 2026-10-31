@@ -1,4 +1,4 @@
-"""Stage 3: turn the line art into product-style photos with SDXL and a scribble ControlNet.
+"""Stage 3: turn the line art into realistic studio photos with SDXL and a scribble ControlNet.
 
 The ControlNet keeps the sketch's outline and layout; the prompt asks for one centred object on a
 plain background in soft light, which is what the 3D model reconstructs best from. A rough doodle

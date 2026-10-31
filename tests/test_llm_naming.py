@@ -11,7 +11,7 @@ from sketch2shape.config import load_config
 from sketch2shape.contracts import Intent, SketchAsset
 from sketch2shape.runstore import RunStore
 from sketch2shape.stages.generate import sketch_control
-from sketch2shape.stages.understand import name_with_llm, parse_naming, understand
+from sketch2shape.stages.understand import name_with_llm, parse_naming, realistic, understand
 
 GOOD = ('{"object": "Headphones", "details": "arched band, two round ear cups", '
         '"material": "matte black plastic", "drawing": "clean", "confidence": 0.9}')
@@ -25,11 +25,12 @@ def fake_openai(behaviour: dict) -> types.ModuleType:
     for name in ("NotFoundError", "BadRequestError", "PermissionDeniedError", "AuthenticationError", "RateLimitError"):
         setattr(module, name, type(name, (module.APIStatusError,), {}))
     module.APIConnectionError = type("APIConnectionError", (Exception,), {})
-    module.calls = []
+    module.calls, module.texts = [], []
 
     class Completions:
         def create(self, model, messages, response_format):
             module.calls.append(model)
+            module.texts.append(messages[0]["content"][0]["text"])
             assert response_format == {"type": "json_object"}
             assert messages[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
             what = behaviour[model]
@@ -38,6 +39,8 @@ def fake_openai(behaviour: dict) -> types.ModuleType:
             if what == "bad key":
                 raise module.AuthenticationError("invalid key")
             content = {"ok": GOOD, "rough": ROUGH}.get(what, "I cannot tell.")
+            if "red leather" in module.texts[-1]:       # like the real models: keep the colours the user typed
+                content = content.replace("matte black plastic", "red leather")
             return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))])
 
     class OpenAI:
@@ -97,34 +100,48 @@ def test_no_key_means_clip(cfg, sketch_png, monkeypatch):
 
 
 def test_understand_uses_the_llm_name_in_the_prompt(cfg, sketch_png, monkeypatch, tmp_path):
-    use_openai(monkeypatch, {"model-a": "ok", "model-b": "ok"})
+    module = use_openai(monkeypatch, {"model-a": "ok", "model-b": "ok"})
     sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
     intent = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
+    g = cfg.generate
     assert intent.source == "openai:model-a" and intent.label == "headphones" and intent.drawing == "clean"
-    assert intent.prompt.startswith("a headphones, matte black plastic, arched band, two round ear cups")
-    assert cfg.generate.rough.prompt not in intent.prompt and intent.negative_prompt == cfg.generate.negative_prompt
-    # a typed description decides appearance: the LLM's material suggestion is not added
+    assert intent.prompt.startswith("a headphones, matte black plastic, arched band, two round ear cups, "
+                                    + g.realism.prompt)
+    assert intent.negative_prompt == f"{g.negative_prompt}, {g.realism.negative_prompt}"
+    # a typed description comes first and goes to the naming call, whose material keeps the user's colours
     typed = understand(models=None, sketch=sketch, user_prompt="red leather headphones", cfg=cfg,
                        store=RunStore(tmp_path / "r2"))
-    assert "matte black plastic" not in typed.prompt and typed.prompt.startswith("red leather headphones")
+    assert '"red leather headphones"' in module.texts[-1]
+    assert typed.prompt.startswith(f"red leather headphones, {g.realism.prompt}")      # "red leather" not repeated
+    assert "matte black plastic" not in typed.prompt
+    # a short typed description that names no colours (the cat case) still gets them from the naming call
+    short = understand(models=None, sketch=sketch, user_prompt="headphones on a stand", cfg=cfg,
+                       store=RunStore(tmp_path / "r3"))
+    assert short.prompt.startswith(f"headphones on a stand, matte black plastic, {g.realism.prompt}")
 
 
-def test_a_rough_doodle_is_loosened_and_asked_to_look_real(cfg, sketch_png, monkeypatch, tmp_path):
+def test_a_rough_doodle_gets_lighter_control(cfg, sketch_png, monkeypatch, tmp_path):
     use_openai(monkeypatch, {"model-a": "rough", "model-b": "ok"})
     sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
     rough = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
     g = cfg.generate
-    assert rough.drawing == "rough" and g.rough.prompt in rough.prompt
-    assert rough.negative_prompt.endswith(g.rough.negative_prompt)
+    assert rough.drawing == "rough" and g.realism.prompt in rough.prompt
     # lighter, shorter control in the first round only; a retry follows the lines on every step again
     assert sketch_control(rough, 0.7, 0, g) == (g.rough.control_scale, g.rough.control_end)
     assert sketch_control(rough, 0.8, 1, g) == (0.8, 1.0)
     for drawing in ("clean", ""):                             # clean, or no LLM judgement: unchanged control
         assert sketch_control(Intent("mug", 0.9, "clip", "a mug", "", drawing=drawing), 0.7, 0, g) == (0.7, 1.0)
-    # a typed description decides appearance: no realism words or extra negatives, but the control is still lighter
-    typed = understand(models=None, sketch=sketch, user_prompt="a cartoon cat", cfg=cfg, store=RunStore(tmp_path / "r3"))
-    assert g.rough.prompt not in typed.prompt and typed.negative_prompt == g.negative_prompt
-    assert sketch_control(typed, 0.7, 0, g)[1] == g.rough.control_end
+    # a typed request for a style turns the realism words off; the doodle still gets lighter control
+    styled = understand(models=None, sketch=sketch, user_prompt="a cartoon cat", cfg=cfg, store=RunStore(tmp_path / "r2"))
+    assert g.realism.prompt not in styled.prompt and styled.negative_prompt == g.negative_prompt
+    assert sketch_control(styled, 0.7, 0, g)[1] == g.rough.control_end
+
+
+def test_only_style_words_turn_realism_off():
+    for text in ("", "cat sleeping", "toyota car", "red leather headphones"):
+        assert realistic(text), text
+    for text in ("a cartoon cat", "Cartoonish dog", "toy car", "low-poly tree", "stone statue", "rendered vase"):
+        assert not realistic(text), text
 
 
 def test_parse_naming_accepts_fenced_json():

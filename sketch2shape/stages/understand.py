@@ -3,7 +3,9 @@
 With an LLM API key set, one vision call names the object and notes its visible shape features:
 OpenAI when OPENAI_API_KEY is set, otherwise Claude when ANTHROPIC_API_KEY is set (config can force
 either). Without a key, or on any API error or refusal, CLIP picks a name from a fixed list instead, so
-the pipeline never depends on a key. A typed user prompt always wins over the guessed name.
+the pipeline never depends on a key. A typed user prompt always wins over the guessed name; the call
+sees it, so its colour and material suggestion keeps what the user asked for. The prompt asks for a
+photorealistic object unless the typed description asks for a style such as a cartoon or a toy.
 """
 from __future__ import annotations
 
@@ -22,10 +24,11 @@ from ..vocab import OBJECTS
 NAMING_PROMPT = (
     "This is a hand-drawn sketch of one object that will be turned into a realistic 3D model. "
     "Name the object in one to three plain words, for example 'coffee mug', 'armchair' or 'sports car'. "
-    "In details, list at most 12 words about the real object's shape and pose as the sketch shows it, for "
+    "In details, list at most 10 words about the real object's shape and pose as the sketch shows it, for "
     "example 'tall tapered body, round handle on the right'; describe the object, not the drawing style. "
-    "In material, give one short phrase for the real colours and surface it would plausibly have, for "
-    "example 'white glazed ceramic', 'brushed steel', 'soft grey plush fabric' or 'short tabby fur'. "
+    "In material, give at most 8 words on the real colours, pattern and surface it would most plausibly have "
+    "in real life, for example 'white glazed ceramic', 'brushed steel and black rubber' or 'orange tabby "
+    "fur, white chest'. "
     "In drawing, answer 'clean' if the lines already show the real object's true shape and proportions, or "
     "'rough' if it is a quick, wobbly, childlike or cartoon-style doodle (odd proportions, a smiley face, "
     "lumpy outlines) that the real object should not copy line for line. Set confidence between 0 and 1."
@@ -45,8 +48,24 @@ NAMING_SCHEMA = {
 }
 
 
+USER_TEXT = (" The user also typed this description: \"{}\". In material, keep every colour, material or "
+             "style it names and only fill in what it leaves open.")
+
 JSON_REPLY = (" Reply only with a JSON object with the keys object (string), details (string), "
               "material (string), drawing ('clean' or 'rough') and confidence (number).")
+
+# A typed description asking for one of these looks turns the realism words off.
+STYLE_WORDS = re.compile(r"\b(cartoon\w*|anime|chibi|toys?|figurines?|statues?|sculptures?|lego|origami|"
+                         r"low[- ]?poly|voxel\w*|styli[sz]ed|render\w*)\b", re.I)
+
+
+def naming_text(user_prompt: str) -> str:
+    return NAMING_PROMPT + (USER_TEXT.format(user_prompt.strip()) if user_prompt.strip() else "")
+
+
+def realistic(user_prompt: str) -> bool:
+    """False when a typed description asks for a non-realistic look, such as a cartoon or a toy."""
+    return not STYLE_WORDS.search(user_prompt or "")
 
 
 def parse_naming(text: str) -> dict | None:
@@ -71,7 +90,7 @@ def parse_naming(text: str) -> dict | None:
             "drawing": drawing if drawing in ("clean", "rough") else "", "confidence": confidence}
 
 
-def name_with_llm(image_path: Path, cfg) -> tuple[dict | None, str]:
+def name_with_llm(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
     """Pick the provider from config and the keys present. Returns (result or None, note for the run log)."""
     llm = cfg.understand.llm
     if not llm.enabled:
@@ -81,13 +100,13 @@ def name_with_llm(image_path: Path, cfg) -> tuple[dict | None, str]:
         provider = ("openai" if os.environ.get("OPENAI_API_KEY")
                     else "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None)
     if provider == "openai":
-        return openai_name(image_path, cfg)
+        return openai_name(image_path, cfg, user_prompt)
     if provider == "anthropic":
-        return claude_name(image_path, cfg)
+        return claude_name(image_path, cfg, user_prompt)
     return None, "No LLM API key set (OPENAI_API_KEY or ANTHROPIC_API_KEY); using CLIP instead."
 
 
-def openai_name(image_path: Path, cfg) -> tuple[dict | None, str]:
+def openai_name(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
     """Ask an OpenAI vision model what the sketch shows, trying the configured models in order."""
     llm = cfg.understand.llm
     if not os.environ.get("OPENAI_API_KEY"):
@@ -100,7 +119,7 @@ def openai_name(image_path: Path, cfg) -> tuple[dict | None, str]:
     client = openai.OpenAI(timeout=float(llm.timeout_s), max_retries=1)
     image_url = "data:image/png;base64," + base64.standard_b64encode(Path(image_path).read_bytes()).decode()
     messages = [{"role": "user", "content": [
-        {"type": "text", "text": NAMING_PROMPT + JSON_REPLY},
+        {"type": "text", "text": naming_text(user_prompt) + JSON_REPLY},
         {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}},   # low detail: cheap, enough for a sketch
     ]}]
     skipped = []
@@ -127,7 +146,7 @@ def openai_name(image_path: Path, cfg) -> tuple[dict | None, str]:
     return None, f"No configured OpenAI model was usable ({'; '.join(skipped)}); using CLIP instead."
 
 
-def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
+def claude_name(image_path: Path, cfg, user_prompt: str = "") -> tuple[dict | None, str]:
     """Ask Claude what the sketch shows. Returns (result or None, note for the run log)."""
     llm = cfg.understand.llm
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -147,7 +166,7 @@ def claude_name(image_path: Path, cfg) -> tuple[dict | None, str]:
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_data}},
-                {"type": "text", "text": NAMING_PROMPT},
+                {"type": "text", "text": naming_text(user_prompt)},
             ],
         }],
     )
@@ -199,23 +218,24 @@ def with_article(noun: str) -> str:
     return f"{'an' if noun[:1] in 'aeiou' else 'a'} {noun}"
 
 
-def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "",
-                 drawing: str = "") -> str:
-    if user_prompt:                         # the user's words decide appearance; the LLM's material is not used
+def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "") -> str:
+    g = cfg.generate
+    if user_prompt:                         # the user's words come first; the naming call kept their colours
         subject = user_prompt
         if label and label not in user_prompt.lower():
             subject = f"{with_article(label)}, {user_prompt}"
+        if material and material.lower() not in user_prompt.lower():
+            subject += f", {material}"
     elif label:
         subject = with_article(label) + "".join(f", {part}" for part in (material, details) if part)
-        if drawing == "rough":              # a doodle: ask for the real thing, not a copy of the cartoon
-            subject += f", {cfg.generate.rough.prompt}"
     else:
         subject = "a single everyday object"
-    return f"{subject}, {cfg.generate.prompt_suffix}"
+    realism = f"{g.realism.prompt}, " if realistic(user_prompt) else ""
+    return f"{subject}, {realism}{g.prompt_suffix}"
 
 
 def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
-    named, note = name_with_llm(sketch.lineart_path, cfg)
+    named, note = name_with_llm(sketch.lineart_path, cfg, user_prompt)
     if note:
         store.warn(note)
     material, drawing = "", ""
@@ -232,10 +252,10 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
         else:
             label, source = None, "none"
     negative_prompt = cfg.generate.negative_prompt
-    if drawing == "rough" and not user_prompt:
-        negative_prompt += f", {cfg.generate.rough.negative_prompt}"
+    if realistic(user_prompt):
+        negative_prompt += f", {cfg.generate.realism.negative_prompt}"
     return Intent(
         label=label, confidence=round(confidence, 3), source=source,
-        prompt=build_prompt(label, details, user_prompt, cfg, material, drawing),
+        prompt=build_prompt(label, details, user_prompt, cfg, material),
         negative_prompt=negative_prompt, details=details, drawing=drawing,
     )

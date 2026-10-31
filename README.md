@@ -20,11 +20,13 @@ sketch (canvas or upload) + optional description
   1 preprocess    OpenCV: flatten, invert if dark, even out paper lighting, threshold, drop specks,
                   crop and centre, square to 1024 px, close gaps, thicken thin lines, fill a silhouette
   2 understand    name the object: one vision-LLM call if OPENAI_API_KEY (or ANTHROPIC_API_KEY) is set,
-                  otherwise CLIP zero-shot over ~170 everyday objects; the same call judges the drawing clean
-                  or rough; build the prompt (a typed description always wins)
-  3 generate      SDXL + xinsir scribble ControlNet: a product-style photo that keeps the sketch's outline;
-                  a rough doodle gets lighter control for the first 60% of the steps and "photorealistic,
-                  lifelike" in the prompt, so it becomes a real-looking object instead of a copy of the cartoon
+                  otherwise CLIP zero-shot over ~170 everyday objects; the same call suggests real colours
+                  and surface (keeping any the user typed) and judges the drawing clean or rough; build the
+                  prompt (a typed description always comes first)
+  3 generate      SDXL + xinsir scribble ControlNet: a photorealistic studio photo that keeps the sketch's
+                  outline (no realism words if the description asks for a style such as cartoon or toy);
+                  a rough doodle gets lighter control for the first 60% of the steps, so it becomes a
+                  real-looking object instead of a copy of the cartoon
   4 score         gate 1: sketch-line recall vs image edges, silhouette IoU, CLIP agreement
                   -> below threshold: regenerate with new seeds and stronger conditioning (max 2 rounds)
   5 prepare       background removal (fallback: colour threshold), crop, centre, margin
