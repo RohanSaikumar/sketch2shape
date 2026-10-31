@@ -1,0 +1,73 @@
+# Sketch2Shape settings. Values marked "calibrate" are first guesses, to tune on the test sketches.
+
+runs_dir: runs
+time_budget_s: 900            # whole run; retries stop once this is spent and the best result so far is exported
+
+gpus:                         # measured on Kaggle T4s (15 GB each)
+  sdxl: 0                     # SDXL + ControlNet + CLIP: 13.4 GB peak for 2 images
+  hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB) and texture (12.8 GB); set to 0 on a single-GPU machine
+
+preprocess:
+  size: 1024
+  pad_ratio: 0.12
+  min_stroke_ratio: 0.001     # below this share of stroke pixels the canvas counts as empty
+  speck_area_px: 20           # specks smaller than this (at 1024 x 1024) are dropped
+
+understand:
+  llm:
+    enabled: true             # used only when ANTHROPIC_API_KEY is set; CLIP is used otherwise
+    model: claude-opus-5-5
+    effort: low
+    server_fallback: true     # re-run on a fallback model if the request is declined
+    timeout_s: 30
+  clip_model: openai/clip-vit-base-patch32
+  clip_min_confidence: 0.25   # calibrate
+
+generate:
+  base_model: stabilityai/stable-diffusion-xl-base-1.0
+  controlnet: xinsir/controlnet-scribble-sdxl-1.0
+  vae: madebyollin/sdxl-vae-fp16-fix
+  control_polarity: bw        # bw = black lines on white; the Kaggle trial showed both polarities work
+  candidates: 2               # 2 images take about 62-69 s on a T4; use 1 to roughly halve that
+  size: 1024
+  steps: 25
+  guidance_scale: 6.0
+  control_scale: 0.7
+  control_scale_step: 0.1
+  max_control_scale: 1.0
+  seed: 42
+  prompt_suffix: "single object, centered, whole object in frame, product photo, plain white background, soft even studio lighting, high detail"
+  negative_prompt: "multiple objects, cropped, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid"
+
+score:
+  threshold: 0.35             # calibrate
+  max_rounds: 2               # extra generation rounds when no candidate passes
+  edge_tolerance: 0.02        # share of the image width a sketch line may be off by
+  weights: {edges: 0.5, silhouette: 0.3, clip: 0.2}
+
+prepare:
+  margin: 0.15
+  size: 1024
+  min_mask_ratio: 0.03
+  max_mask_ratio: 0.95
+
+reconstruct:
+  model: tencent/Hunyuan3D-2
+  shape_subfolder: hunyuan3d-dit-v2-0-turbo
+  shape_steps: 5
+  flashvdm: true
+  seed: 1234
+  max_shape_attempts: 2
+  texture: true
+  park_on_cpu: true           # shape (<= 9.4 GB) and texture (12.8 GB) take turns on GPU 1; the idle one waits in CPU memory
+  paint_cpu_offload_on_oom: true
+
+validate:
+  min_faces: 500
+  min_flatness: 0.08          # smallest / largest bounding-box side; below this the model is a flat plate
+  max_fragment_share: 0.02    # loose pieces smaller than this share of the surface are removed
+
+export:
+  formats: [glb, obj]
+  normalize: true             # centre, scale to 1 unit, rest on y = 0
+  flip_projection_x: false    # flip if projected fallback colours come out mirrored
