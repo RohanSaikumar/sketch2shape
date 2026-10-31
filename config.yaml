@@ -59,7 +59,8 @@ reconstruct:
   seed: 1234
   max_shape_attempts: 2
   texture: true
-  park_on_cpu: true           # shape (<= 9.4 GB) and texture (12.8 GB) take turns on GPU 1; the idle one waits in CPU memory
+  park_on_cpu: false          # shape (<= 9.4 GB) and texture (12.8 GB) take turns on GPU 1. false: the idle one is
+                              # released and reloaded (~1 min each); true keeps it in CPU RAM, which overflowed Kaggle's 30 GB
   paint_cpu_offload_on_oom: true
 
 validate:

@@ -137,7 +137,8 @@ python -m pytest -q tests          # offline tests, no GPU needed
 |---|---|
 | `'StableDiffusionXLControlNetPipeline' object has no attribute 'enable_vae_slicing'` | Newer diffusers; already handled (`pipe.vae.enable_slicing()`). Update the code. |
 | `... contains custom code in pipeline.py ... Pass trust_remote_code=True` | Run `scripts/setup.sh`; it patches Hunyuan's multiview loader. |
-| CUDA out of memory while texturing | Handled automatically: retries with CPU offload. Keep `reconstruct.park_on_cpu: true` so the shape model leaves GPU 1 first. |
+| CUDA out of memory while texturing | Handled automatically: retries with CPU offload. Only one 3D model is on GPU 1 at a time. |
+| "Your notebook tried to allocate more memory than is available" (CPU RAM) | Keep `reconstruct.park_on_cpu: false` (default), so idle 3D models are released instead of kept in RAM. |
 | CUDA extension build fails with pip | `scripts/setup.sh` falls back to `python setup.py install`; its log is in `/tmp/s2s_build_<name>.log`. |
 | Model looks mirrored in projected-colour fallback | Set `export.flip_projection_x: true`. |
 | "The sketch looks empty" | Draw darker or thicker lines, or upload a higher-contrast photo. |

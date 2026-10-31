@@ -2,9 +2,10 @@
 
 Measured on Kaggle's two T4s: SDXL + ControlNet generating two images peaks at 13.4 GB, so GPU 0 holds
 SDXL and CLIP only. On GPU 1, Hunyuan3D-2's shape model peaks at up to 9.4 GB and its texture model at
-12.8 GB, so the two cannot sit there together: they take turns, and the idle one waits in CPU memory
-(a few seconds to move, against about a minute to reload from disk). If a model cannot be moved it is
-released and reloaded when next needed.
+12.8 GB, so the two cannot sit there together: they take turns. By default (park_on_cpu: false) the
+idle one is released and reloaded from disk when next needed, about a minute each, because keeping it
+in CPU memory overflowed Kaggle's 30 GB of RAM. With park_on_cpu: true it waits in CPU memory instead
+(a few seconds to move back) on machines with more RAM.
 
 On a single GPU, SDXL moves to the CPU before the 3D models load, and the 3D models are released
 before SDXL runs again. Heavy imports happen inside the methods so the rest of the package (and the
