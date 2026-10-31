@@ -88,7 +88,7 @@ Measured per stage on the T4s (Kaggle trial run, 31 Oct 2026):
 
 1. Create a notebook from `notebooks/kaggle_run.ipynb` (File, Import Notebook). It clones https://github.com/RohanSaikumar/sketch2shape.
 2. Session options: Accelerator **GPU T4 x2**, Internet **On**. Optionally add `ANTHROPIC_API_KEY` and `HF_TOKEN` as secrets.
-3. Run All (change `REPO_URL` in the first cell only for a fork). It runs setup, the offline tests, one example, then the app with a public link.
+3. Run All (change `REPO_URL` in the first cell only for a fork). It runs setup, the offline tests and all example sketches, shows the results, then the app with a public link.
 
 ### On a Linux machine with an NVIDIA GPU
 
