@@ -362,6 +362,32 @@ showed their true colours (top). The files were fine; the app's viewer was repla
 | The texture step was killed; models came out with flat projected colours | SDXL kept loaded (~6 GB) + texture load (~15 GB) exceeded 30 GB RAM | SDXL released once the image is chosen; RAM guard; RAM logged per step |
 | Models looked black, metallic or lavender | library default materials; Gradio viewer lighting | matte export material; model-viewer |
 
+Outputs from along the way (the finished examples are in the [README](../README.md#results) and
+[`examples/`](../examples/README.md)):
+
+**Rough doodle path.** A mouse doodle of a sleeping cat was judged rough: lighter sketch control, a
+realistic prompt, two images, the image check picks one. Left to right: doodle, generated image, cut-out.
+
+![Cat doodle, generated image, cut-out](images/cat_steps.jpg)
+
+![Cat 3D model](images/cat_model.jpg)
+
+**Scene path.** A sideways phone photo of a landscape was turned upright and recognised as a scene,
+so it was built as a diorama. The first round was rejected by the image check (a round frame,
+scenery behind); the second passed.
+
+![Landscape sketch photo](images/landscape_input.jpg)
+
+![Landscape: cleaned sketch, rejected image, picked image, cut-out](images/landscape_steps.jpg)
+
+![Diorama model](images/landscape_diorama_model.jpg)
+
+**Still open.** A football with hatched black panels became a white ball: the hatching is turned
+into outlines so it is not copied as scribbles, but the colour it stood for is lost on clean
+drawings ([section 12](#12-limitations-and-known-issues)). A typed description ("black and white football") restores it.
+
+![Football sketch with hatched panels and the white ball made from it](images/ball_input_and_model.jpg)
+
 ---
 
 ## 9. Reproducibility
@@ -442,4 +468,4 @@ showed their true colours (top). The files were fine; the app's viewer was repla
 3. Narrate the progress panel: cleaned sketch → generated image and the image check's verdict → cut-out → untextured shape (rotatable) → textured model.
 4. Rotate the model in the viewer, download the GLB and open it in another viewer; open **Run details** to show the prompt, the kind of sketch, the image-check verdict, the scores and the timings.
 5. Explain the key decisions: the two-stage design, settings per kind of sketch chosen by experiment, the two quality gates, worker processes and the RAM guard ([section 6](#6-key-implementation-decisions)).
-6. Show **Previous models** and the example outputs in `examples/outputs/`.
+6. Show **Previous models** and the finished examples: each input with its GLB, OBJ and preview in [`examples/outputs/`](../examples/README.md).

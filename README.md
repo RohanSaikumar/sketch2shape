@@ -28,23 +28,36 @@ Built in 24 hours for TechZephyr 4.0 (IIT Bhubaneswar), problem statement *Sketc
 
 ## Results
 
-All examples below are real outputs of the app on Kaggle's free 2x T4, made live from the input shown.
+Real outputs of the app on Kaggle's free 2x T4. Each row: the input sketch, the textured 3D model,
+and the model from the other side. The GLB and OBJ files for every row are in
+[`examples/outputs/`](examples/outputs/) ([index](examples/README.md)).
 
-| Input | What the app made |
-|---|---|
-| **Phone photo of a pen sketch** (headphones, no description). Clean drawing: one product-style image, full sketch control. | Textured headphones with the arched band, both ear cups and padding (top of this page). |
-| **Rough mouse doodle** of a sleeping cat on the canvas. Judged a rough doodle: lighter sketch control, realistic prompt, two images, GPT picks one. | ![Cat doodle, generated image, cut-out](docs/images/cat_steps.jpg) ![Cat 3D model](docs/images/cat_model.jpg) |
-| **Sideways phone photo of a landscape** (hills, pine trees, a cabin, birds). Turned upright and recognised as a scene, so it is built as a miniature diorama. The first round was rejected by the image check (a round frame, scenery behind); the second passed. | ![Landscape sketch photo](docs/images/landscape_input.jpg) ![Diorama model](docs/images/landscape_diorama_model.jpg) |
-| | ![Landscape: cleaned sketch, rejected image, picked image, cut-out](docs/images/landscape_steps.jpg) |
+**Table lamp** (plain line drawing)
 
-**A limitation, shown honestly:** a football with hatched black panels became a white ball. The
-hatching is turned into panel outlines (so it is not copied as scribbles), but the colour it stood
-for is lost for clean drawings.
+![Table lamp sketch and its 3D model](docs/images/example_table_lamp.jpg)
 
-![Football sketch with hatched panels and the white ball made from it](docs/images/ball_input_and_model.jpg)
+**Chair** (simple line drawing)
 
-Example output files: [`examples/outputs/`](examples/outputs/) holds GLB and OBJ files made by the
-app, with their input sketches.
+![Chair sketch and its 3D model](docs/images/example_chair.jpg)
+
+**Coffee mug** (wobbly doodle)
+
+![Coffee mug doodle and its 3D model](docs/images/example_coffee_mug.jpg)
+
+**Hills** (a scene, so it is built as a miniature diorama)
+
+![Mountain sketch and the diorama made from it](docs/images/example_hills.jpg)
+
+**New York skyline** (a scene, built as a diorama)
+
+![Skyline drawing and the diorama made from it](docs/images/example_ny_skyline.jpg)
+
+**Pikachu** (screenshot of a pencil drawing)
+
+![Pikachu drawing and its 3D model](docs/images/example_pikachu.jpg)
+
+The headphones at the top of this page are the seventh example. How the design got here, with the
+failed and early outputs, is in [the documentation, section 8.4](docs/DOCUMENTATION.md#84-failures-that-shaped-the-design).
 
 ## Time and hardware
 
@@ -207,5 +220,5 @@ scripts/                    setup, weight prefetch, batch evaluation, results co
 notebooks/kaggle_run.ipynb  the Kaggle notebook
 tests/                      offline tests
 docs/                       documentation, architecture decision PDF, images
-examples/                   example sketches, prompts and outputs
+examples/                   example sketches, prompts, and outputs paired with their inputs (examples/README.md)
 ```
