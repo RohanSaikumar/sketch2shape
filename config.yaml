@@ -53,9 +53,15 @@ generate:
   realism:                    # added unless a typed description asks for a style (cartoon, toy, low poly, ...)
     prompt: "photorealistic, realistic proportions, natural colours and textures"
     negative_prompt: "3d render, cartoon, figurine"
+  clean:                      # a clean drawing (or no LLM judgement): the 1 Nov morning settings, which won the
+                              # comparison on the watering can and headphones; GPT's words there added mistakes
+                              # ("spout with rose" -> a flower, "black plastic" -> a dark background)
+    prompt_suffix: "single object, centered, entire object visible, product photo, plain white background, soft even studio lighting, high detail"
+    negative_prompt: "multiple objects, cropped, picture frame, border, text, watermark, cast shadow, ground, scene, cluttered background, blurry, sketch, line art, drawing, hands, people, liquid"
+    candidates: 1             # these settings are reliable; one image saves ~38 s (the check still retries a bad one)
   rough:                      # the LLM naming call judged the sketch a quick or cartoon-style doodle (never without a key)
-    control_scale: 0.55       # until an image drifts from the lines; then retries follow them fully
-    control_end: 0.6          # the sketch guides the first 60% of the steps (layout, silhouette), then the model is free
+    control_scale: 0.7        # compared with 0.55 for 60%: equally good cats and closer to the drawing
+    control_end: 0.8          # the sketch guides the first 80% of the steps, then the model is free
   scene:                      # the naming call saw a landscape or several things: made as a miniature diorama
     control_scale: 0.3        # a scene's lines do not fit one object, so the sketch only hints at the layout
     control_end: 0.4

@@ -102,12 +102,25 @@ def test_no_key_means_clip(cfg, sketch_png, monkeypatch):
     assert named is None and "No LLM API key" in note
 
 
-def test_understand_uses_the_llm_name_in_the_prompt(cfg, sketch_png, monkeypatch, tmp_path):
-    module = use_openai(monkeypatch, {"model-a": "ok", "model-b": "ok"})
+def test_a_clean_drawing_gets_the_plain_product_photo_prompt(cfg, sketch_png, monkeypatch, tmp_path):
+    use_openai(monkeypatch, {"model-a": "ok", "model-b": "ok"})
     sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
     intent = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
     g = cfg.generate
     assert intent.source == "openai:model-a" and intent.label == "headphones" and intent.drawing == "clean"
+    # the comparison: GPT's colours and details added mistakes to clean drawings, so only the name is used
+    assert intent.prompt == f"a headphones, {g.clean.prompt_suffix}"
+    assert intent.negative_prompt == g.clean.negative_prompt
+    typed = understand(models=None, sketch=sketch, user_prompt="red leather headphones", cfg=cfg,
+                       store=RunStore(tmp_path / "r2"))
+    assert typed.prompt == f"red leather headphones, {g.clean.prompt_suffix}"
+
+
+def test_a_rough_doodle_gets_gpt_colours_and_realism(cfg, sketch_png, monkeypatch, tmp_path):
+    module = use_openai(monkeypatch, {"model-a": "rough", "model-b": "rough"})
+    sketch = SketchAsset(sketch_png, sketch_png, sketch_png, 0.05, "upload")
+    intent = understand(models=None, sketch=sketch, user_prompt="", cfg=cfg, store=RunStore(tmp_path / "r"))
+    g = cfg.generate
     assert intent.prompt.startswith("a headphones, matte black plastic, arched band, two round ear cups, "
                                     + g.realism.prompt)
     assert intent.negative_prompt == f"{g.negative_prompt}, {g.realism.negative_prompt}"

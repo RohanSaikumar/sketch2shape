@@ -29,7 +29,7 @@ from .stages.prepare import prepare
 from .stages.preprocess import EmptySketchError, preprocess, turn_upright
 from .stages.reconstruct import make_shape, paint_mesh, project_colours, shape_model_job
 from .stages.score import score_candidates
-from .stages.understand import understand
+from .stages.understand import is_clean, understand
 from .stages.validate import check_mesh, drop_fragments
 
 
@@ -265,6 +265,8 @@ class Sketch2Shape:
     def _understand(self, ctx: RunContext) -> str:
         ctx.intent = understand(self.models, ctx.sketch, ctx.prompt, self.cfg, ctx.store)
         ctx.negative_base = ctx.intent.negative_prompt
+        if is_clean(ctx.intent.kind, ctx.intent.drawing):   # reliable settings: one image is enough
+            ctx.candidates_n = min(ctx.candidates_n, int(self.cfg.generate.clean.candidates))
         turns = turn_upright(ctx.sketch, ctx.intent.up)
         if turns:
             ctx.store.warn(f"The drawing was {'upside down' if turns == 2 else 'sideways'}; turned it upright.")

@@ -131,9 +131,20 @@ def with_article(noun: str) -> str:
     return f"{'an' if noun[:1] in 'aeiou' else 'a'} {noun}"
 
 
+def is_clean(kind: str, drawing: str) -> bool:
+    """A clean drawing of one object (or no LLM judgement): the plain product-photo prompt suits it best."""
+    return kind != "scene" and drawing != "rough"
+
+
 def build_prompt(label: str | None, details: str, user_prompt: str, cfg, material: str = "",
-                 kind: str = "") -> str:
+                 kind: str = "", drawing: str = "") -> str:
     g = cfg.generate
+    if is_clean(kind, drawing):             # the sketch shows the shape; extra words only added mistakes
+        if user_prompt:
+            subject = user_prompt if not label or label in user_prompt.lower() else f"{with_article(label)}, {user_prompt}"
+        else:
+            subject = with_article(label) if label else "a single everyday object"
+        return f"{subject}, {g.clean.prompt_suffix}"
     if user_prompt:                         # the user's words come first; the naming call kept their colours
         subject = user_prompt
         if label and label not in user_prompt.lower():
@@ -170,11 +181,14 @@ def understand(models, sketch, user_prompt: str, cfg, store) -> Intent:
         else:
             label, source = None, "none"
     g = cfg.generate
-    negative_prompt = g.scene.negative_prompt if kind == "scene" else g.negative_prompt
-    if realistic(user_prompt):
-        negative_prompt += f", {g.realism.negative_prompt}"
+    if is_clean(kind, drawing):
+        negative_prompt = g.clean.negative_prompt
+    else:
+        negative_prompt = g.scene.negative_prompt if kind == "scene" else g.negative_prompt
+        if realistic(user_prompt):
+            negative_prompt += f", {g.realism.negative_prompt}"
     return Intent(
         label=label, confidence=round(confidence, 3), source=source,
-        prompt=build_prompt(label, details, user_prompt, cfg, material, kind),
+        prompt=build_prompt(label, details, user_prompt, cfg, material, kind, drawing),
         negative_prompt=negative_prompt, details=details, drawing=drawing, kind=kind, up=up,
     )

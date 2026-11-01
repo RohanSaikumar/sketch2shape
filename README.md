@@ -24,10 +24,11 @@ sketch (canvas or upload) + optional description
                   and surface (keeping any the user typed), judges the drawing clean or rough, says whether
                   it is one object or a scene, and which way is up (a sideways photo is turned upright);
                   build the prompt (a typed description always comes first)
-  3 generate      SDXL + xinsir scribble ControlNet: two photorealistic studio photos that keep the
-                  sketch's outline (no realism words if the description asks for a style such as cartoon);
-                  a rough doodle gets lighter control for the first 60% of the steps; a scene is made as
-                  a miniature diorama on a round base, with the sketch only hinting at the layout
+  3 generate      SDXL + xinsir scribble ControlNet, settings chosen per kind of sketch from a side-by-side
+                  comparison (scripts/compare_settings.py): a clean drawing gets one plain product photo
+                  ("a <name>, product photo, plain white background ...", full sketch control); a rough
+                  doodle gets two photorealistic images with GPT's colours and pose words, the sketch
+                  guiding 80% of the steps; a scene becomes a miniature diorama on a round base
   4 score         gate 1: the vision LLM picks the photo showing one complete real object (or diorama)
                   alone on a plain background, rejecting frames, rings, scenery, extra objects, cut-off
                   parts and flat plaques; then sketch-line recall vs image edges, silhouette IoU, CLIP
