@@ -127,9 +127,9 @@ The settings below were chosen by a side-by-side comparison on real sketches ([s
 | **Scene** (landscape, several things) | `a miniature diorama of <scene>, <colours>, on a small round base, photorealistic, ...` | light: 0.3 for the first 40% of the steps | 2 |
 | **Typed description** | the user's words first, then the name if missing; no realism words if the text asks for a style (cartoon, toy, low poly, statue, ...) | as for the kind of sketch | as above |
 
-Negative prompts block multiple objects, cropping, frames and borders, scenery, text, shadows, flat
-results (flat, 2D, relief, plaque, cookie cutter, sticker) and glossy highlights that would be baked
-into the texture. Every prompt was checked to fit CLIP's 77-token limit (SDXL silently drops the rest),
+Negative prompts (one set per kind of sketch) block multiple objects, cropping, frames and borders,
+scenery, text and shadows; the rough-doodle set also blocks flat results (flat, 2D, relief, plaque,
+cookie cutter, sticker) and glossy highlights that would be baked into the texture. Every prompt was checked to fit CLIP's 77-token limit (SDXL silently drops the rest),
 with room left for the image check's "avoid" words.
 
 ### 3.4 Generate (`stages/generate.py`)
@@ -184,7 +184,7 @@ viewer (trimesh's defaults had made models look black or metallic). It writes `m
 - A status line under the panel: whether SDXL and the 3D shape model are loaded or loading.
 - Live intermediate images (cleaned sketch, images with their score or "rejected by the image check", cut-out) and the untextured shape while the texture is painted.
 - A rotatable 3D viewer (Google `<model-viewer>`, neutral lighting) and downloads; **Run details** with the run summary; **Previous models** to reopen earlier runs with their images and details.
-- One model at a time (also across page reloads); Cancel stops GPU work at once.
+- One model at a time (also across page reloads); Cancel stops GPU work at once (SDXL within one step).
 
 ---
 
@@ -228,7 +228,7 @@ after every step.
 
 | Mode | Used for | Effect |
 |---|---|---|
-| **kept loaded** | SDXL on GPU 0 and the shape model on GPU 1 (two GPUs) | loaded at app start and reloaded after each run; no loading inside a run |
+| **kept loaded** | SDXL on GPU 0 and the shape model on GPU 1 (two GPUs) | loaded at app start; the shape model stays loaded, SDXL is stopped once the image is chosen and reloads after the run; no loading inside a run |
 | **loaded early** | the texture model on GPU 0 | starts loading as soon as the image is chosen, while the cut-out, scores and shape run |
 | **fresh** | everything on a single GPU, or when RAM is short | load, one job, exit |
 
@@ -439,7 +439,7 @@ realistic prompt, two images, the image check picks one. Left to right: doodle, 
 
 ## 14. Demonstration guide
 
-1. Start the app (Kaggle cells 1-4) and wait for "SDXL ready · 3D shape model ready".
+1. Start the app (Kaggle cells 1-4) and wait until the status line says "SDXL ready (loaded in ... s) · 3D shape model ready".
 2. **Live sketch:** let a judge draw on the canvas or upload a photo; leave the description empty to show it is optional, or add one ("a red ceramic mug") to show prompt control.
 3. Narrate the progress panel: cleaned sketch → generated image and the image check's verdict → cut-out → untextured shape (rotatable) → textured model.
 4. Rotate the model in the viewer, download the GLB and open it in another viewer; open **Run details** to show the prompt, the kind of sketch, the image-check verdict, the scores and the timings.
