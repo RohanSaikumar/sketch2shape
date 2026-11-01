@@ -283,11 +283,24 @@ def serving_models(tmp_path, monkeypatch):
     cfg = load_config(overrides={"runs_dir": str(tmp_path / "runs"), "workers.keep_loaded": ["ping"],
                                  "workers.min_free_ram_gb": 0})
     monkeypatch.setattr(ModelManager, "separate_gpus", lambda self: True)
+    monkeypatch.setattr(ModelManager, "gpu_index", lambda self, role: {"hunyuan": 1}.get(role, 0))
     models = ModelManager(cfg)
     yield models
+    models.keep_warm = False
+    with models._lock:
+        models._waiting.clear()
     models.end_run()
-    for worker in models._kept.values():
-        worker.stop(wait_s=5)
+    for worker in list(models._kept.values()):
+        if hasattr(worker, "proc"):
+            worker.stop(wait_s=5)
+
+
+def wait_for(condition, timeout: float = 30.0) -> None:
+    import time
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.1)
 
 
 def test_a_kept_worker_serves_several_jobs(serving_models, store):
@@ -315,6 +328,7 @@ def test_cancel_stops_the_job_but_keeps_the_model_loaded(serving_models, store):
 
 def test_a_worker_loaded_early_takes_its_one_job_then_exits(serving_models, store):
     import time
+    serving_models.cfg.workers.keep_loaded = []     # a kept task needs no early worker
     serving_models.load_early("ping", "hunyuan", store)
     deadline = time.monotonic() + 30
     while "ping" not in serving_models._early and time.monotonic() < deadline:
@@ -328,6 +342,7 @@ def test_a_worker_loaded_early_takes_its_one_job_then_exits(serving_models, stor
 
 def test_end_run_stops_a_worker_the_run_never_used(serving_models, store):
     import time
+    serving_models.cfg.workers.keep_loaded = []     # a kept task needs no early worker
     serving_models.load_early("ping", "hunyuan", store)
     deadline = time.monotonic() + 30
     while "ping" not in serving_models._early and time.monotonic() < deadline:
@@ -337,16 +352,45 @@ def test_end_run_stops_a_worker_the_run_never_used(serving_models, store):
     assert not early.alive() and not serving_models._early
 
 
-def test_sdxl_pauses_for_the_3d_steps_and_reloads_after_the_run(serving_models, store):
+def test_sdxl_pauses_for_the_3d_steps_and_reloads_after_the_run(serving_models, store, monkeypatch):
     serving_models.keep_warm = True                 # as in the app
+    monkeypatch.setattr(type(serving_models), "kept_specs", lambda self: {"ping": ("sdxl", lambda cfg: {})})
     serving_models.run_worker("ping", "sdxl", store)
     first = serving_models._kept["ping"]
-    serving_models.release_kept()                   # the 3D models need its RAM
+    serving_models.release_kept(("ping",))          # its GPU and RAM go to the 3D models
     assert not first.alive() and not serving_models._kept
-    serving_models.cfg.workers.keep_loaded = ["generate"]       # end_run reloads SDXL: point it at ping instead
-    serving_models._warm_sdxl = lambda: serving_models._kept_worker("ping", "sdxl", {})
-    serving_models.end_run()
-    assert serving_models._kept["ping"].alive() and serving_models._kept["ping"] is not first
+    serving_models.end_run()                        # reloads it in the background
+    wait_for(lambda: "ping" in serving_models._kept)
+    assert serving_models._kept["ping"] is not first
+
+
+def test_the_texture_model_waits_for_sdxl_to_free_its_gpu(serving_models, store):
+    import time
+
+    class Loaded:                                   # stands in for the kept SDXL worker on GPU 0
+        gpu, stopped = 0, False
+        def alive(self): return not self.stopped
+        def loading(self): return False
+        def stop(self, wait_s=30): self.stopped = True
+
+    serving_models._kept["generate"] = Loaded()
+    serving_models.cfg.workers.keep_loaded = []
+    serving_models.load_early("ping", "paint", store)          # "paint" is GPU 0, like SDXL
+    time.sleep(1.5)
+    assert "ping" not in serving_models._early
+    serving_models.release_kept(("generate",))
+    wait_for(lambda: "ping" in serving_models._early)
+
+
+def test_kept_models_make_room_when_ram_is_short(serving_models, store, monkeypatch):
+    import sketch2shape.models as models_module
+    serving_models.run_worker("ping", "sdxl", store)
+    kept = serving_models._kept["ping"]
+    monkeypatch.setattr(models_module, "free_ram_gb", lambda: 5.0)
+    serving_models.cfg.workers.min_free_ram_gb = 16
+    serving_models._make_room(store, "paint")
+    assert not kept.alive() and not serving_models._kept
+    assert store.manifest["ram_made_room"][0]["stopped"] == ["ping"]
 
 
 def test_dense_hatching_becomes_an_outline_and_plain_lines_stay():

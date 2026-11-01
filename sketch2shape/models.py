@@ -47,7 +47,7 @@ class ServingWorker:
 
     def __init__(self, task: str, gpu: int, load: dict, folder: Path):
         tag = f"{task}_{uuid.uuid4().hex[:6]}"
-        self.task, self.load, self.jobs, self.started = task, load, 0, time.monotonic()
+        self.task, self.load, self.gpu, self.jobs, self.started = task, load, gpu, 0, time.monotonic()
         self.ready_path = Path(folder) / f"serve_{tag}_ready.json"
         self.log_path = Path(folder) / f"serve_{tag}.log"
         self.cancel_path: Path | None = None
@@ -68,11 +68,15 @@ class ServingWorker:
     def loading(self) -> bool:
         return self.alive() and not self.ready_path.exists()
 
-    def load_s(self) -> float | None:
+    def ready_info(self) -> dict:
+        """What the worker wrote once loaded: load_s, and rss_gb (the RAM the loaded model keeps)."""
         try:
-            return json.loads(self.ready_path.read_text(encoding="utf-8")).get("load_s")
+            return json.loads(self.ready_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return None
+            return {}
+
+    def load_s(self) -> float | None:
+        return self.ready_info().get("load_s")
 
     def run(self, job: dict, store, timeout_s: float, cancel: threading.Event, last: bool = False) -> dict:
         """Send one job and wait for its result, including any loading still under way. last=True closes the
@@ -189,7 +193,23 @@ class ModelManager:
                     with self._lock:
                         if self._kept.get(task) is kept:
                             del self._kept[task]
+        if task in self.cfg.workers.make_room_for:
+            self._make_room(store, task)
         return self._record(store, task, "fresh", None, self._run_fresh(task, role, store, job))
+
+    def _make_room(self, store, task: str) -> None:
+        """Before a big model loads fresh: if less RAM is free than a load needs (each Hunyuan load peaks
+        ~15 GB), stop the kept workers. The texture model was killed for RAM once; it must not be again."""
+        free = free_ram_gb()
+        if free is None or free >= float(self.cfg.workers.min_free_ram_gb):
+            return
+        with self._lock:
+            kept = list(self._kept.items())
+            self._kept.clear()
+        for name, worker in kept:
+            worker.stop()
+        store.manifest.setdefault("ram_made_room", []).append(
+            {"for": task, "free_ram_gb": free, "stopped": [name for name, _ in kept], "after_gb": free_ram_gb()})
 
     def _record(self, store, task: str, how: str, worker, result: dict) -> dict:
         """Check a job's result and add it to the run's worker log."""
@@ -199,7 +219,9 @@ class ModelManager:
         entry = {"task": task, "how": how}
         if worker is not None:                  # the model's load time is counted once, on its first job
             entry["load_s"] = worker.load_s() if worker.jobs == 1 else 0.0
-        entry.update({k: result[k] for k in ("load_s", "waited_s", "run_s", "peak_gb", "max_rss_gb") if k in result})
+            entry["rss_after_load_gb"] = worker.ready_info().get("rss_gb")
+        entry.update({k: result[k] for k in ("load_s", "waited_s", "run_s", "peak_gb", "max_rss_gb", "rss_gb")
+                      if k in result})
         store.manifest.setdefault("workers", []).append(entry)
         return result
 
@@ -254,50 +276,77 @@ class ModelManager:
             return kept
 
     def load_early(self, task: str, role: str, store, **load) -> None:
-        """Start loading the model for a later step of this run on its own idle GPU, as soon as no other
-        worker is loading and enough RAM is free; run_worker() then hands the step's job to it."""
-        if role == "sdxl" or not self.separate_gpus():
+        """Start loading the model for a later step of this run on a GPU no loaded model is using, as soon
+        as no other worker is loading and enough RAM is free; run_worker() then hands the step's job to it.
+        A task that is kept loaded needs no early worker."""
+        if not self.separate_gpus() or task in self.cfg.workers.keep_loaded:
             return
         with self._lock:
             if task in self._early or task in self._waiting:
                 return
-            self._waiting[task] = (role, store, load)
+            self._waiting[task] = ("early", role, store, load)
+        threading.Thread(target=self._start_waiting, daemon=True).start()
+
+    def kept_specs(self) -> dict:
+        """task -> (GPU role, function giving the fields that choose its model) for the models kept loaded."""
+        from .stages.generate import model_job
+        from .stages.reconstruct import shape_model_job
+        return {"generate": ("sdxl", model_job), "shape": ("hunyuan", shape_model_job)}
+
+    def restore_kept(self) -> None:
+        """Queue the kept models that are not loaded (SDXL first, then the shape model) to load one after
+        another, each once no other worker is loading and enough RAM is free."""
+        if not self.separate_gpus():
+            return
+        specs = self.kept_specs()
+        with self._lock:
+            for task in self.cfg.workers.keep_loaded:
+                kept = self._kept.get(task)
+                if task in specs and task not in self._waiting and (kept is None or not kept.alive()):
+                    role, job = specs[task]
+                    self._waiting[task] = ("kept", role, None, job(self.cfg))
         threading.Thread(target=self._start_waiting, daemon=True).start()
 
     def _start_waiting(self) -> None:
+        """Start the queued workers one at a time: a GPU holds one big model, and each load peaks in RAM."""
         while not self._cancel.is_set():
             with self._lock:
                 if not self._waiting:
                     return
-                busy = bool(self._fresh) or any(w.loading() for w in [*self._kept.values(), *self._early.values()])
+                loaded = [w for w in [*self._kept.values(), *self._early.values()] if w.alive()]
+                busy = bool(self._fresh) or any(w.loading() for w in loaded)
                 free = free_ram_gb()
                 if not busy and (free is None or free >= float(self.cfg.workers.min_free_ram_gb)):
-                    for task, (role, store, load) in self._waiting.items():
-                        self._early[task] = ServingWorker(task, self.gpu_index(role), load, store.dir)
-                        store.manifest.setdefault("loaded_early", []).append({"task": task, "free_ram_gb": free})
-                    self._waiting.clear()
-                    return
+                    for task, (kind, role, store, load) in list(self._waiting.items()):
+                        gpu = self.gpu_index(role)
+                        if any(w.gpu == gpu for w in loaded):
+                            continue                    # its GPU is taken: e.g. the texture model waits for SDXL
+                        del self._waiting[task]
+                        if kind == "kept":
+                            folder = Path(self.cfg.runs_dir) / "_workers"
+                            folder.mkdir(parents=True, exist_ok=True)
+                            self._kept[task] = ServingWorker(task, gpu, load, folder)
+                        else:
+                            self._early[task] = ServingWorker(task, gpu, load, store.dir)
+                            store.manifest.setdefault("loaded_early", []).append({"task": task, "free_ram_gb": free})
+                        break                           # one load at a time
             time.sleep(0.5)
 
     def warm_up(self) -> None:
-        """At app start: begin loading SDXL into its kept worker, and the CPU models in a background thread,
-        so the first run does not wait for them."""
+        """At app start: begin loading the kept models (SDXL, then the shape model), and the CPU models in
+        a background thread, so the first run does not wait for them."""
         self.keep_warm = True
-        self._warm_sdxl()
+        self.restore_kept()
         threading.Thread(target=self._warm_small_models, daemon=True).start()
 
-    def _warm_sdxl(self) -> None:
-        from .stages.generate import model_job
-
-        if "generate" in self.cfg.workers.keep_loaded and self.separate_gpus():
-            self._kept_worker("generate", "sdxl", model_job(self.cfg))
-
-    def release_kept(self) -> None:
-        """Stop the kept workers (SDXL) so the 3D models have their RAM; they are idle by then."""
+    def release_kept(self, tasks=("generate",)) -> None:
+        """Stop kept workers (SDXL, once the image is chosen) so the texture model gets its GPU and the
+        3D models its RAM; they are idle by then."""
         with self._lock:
-            kept = list(self._kept.values())
-            self._kept.clear()
-        for worker in kept:
+            stopping = [self._kept.pop(task) for task in tasks if task in self._kept]
+            for task in tasks:
+                self._waiting.pop(task, None)
+        for worker in stopping:
             worker.stop()
 
     def sdxl_status(self) -> tuple[str, str]:
@@ -305,18 +354,30 @@ class ModelManager:
         if "generate" not in self.cfg.workers.keep_loaded or not self.separate_gpus():
             return "off", "SDXL loads at the start of each run (it is kept loaded only with two GPUs)."
         with self._lock:
-            kept = self._kept.get("generate")
+            kept, queued = self._kept.get("generate"), set(self._waiting)
+            shape = self._kept.get("shape")
+        shape_loading = "shape" in queued or (shape is not None and shape.loading())
+        if "shape" not in self.cfg.workers.keep_loaded:
+            shape_text = ""
+        elif shape is not None and shape.alive() and not shape.loading():
+            shape_text = " · 3D shape model ready"
+        else:
+            shape_text = " · 3D shape model loading" if shape_loading else " · 3D shape model loads on the next run"
         if kept is None:
+            if "generate" in queued:
+                return "loading", "SDXL loads next (after the model loading now, or once enough RAM is free)" + shape_text + "."
             if self.keep_warm:
-                return "off", "SDXL is paused while a 3D model is made (it needs the RAM) and reloads after the run."
+                return "off", ("SDXL is paused while a 3D model is made (its GPU paints the texture) and reloads "
+                               "after the run" + shape_text + ".")
             return "off", "SDXL loads on the first run."
         if not kept.alive():
             return "failed", f"The SDXL worker stopped; the next run loads it again (log: runs/_workers/{kept.log_path.name})."
         if kept.loading():
             return "loading", (f"Loading SDXL... {int(time.monotonic() - kept.started)} s (usually about a minute). "
-                               "You can start a run now; it waits for SDXL.")
+                               "You can start a run now; it waits for SDXL" + shape_text + ".")
         small = "CLIP and background removal ready" if self._clip and self._bg else "CLIP still loading"
-        return "ready", f"SDXL ready (loaded in {kept.load_s() or 0:.0f} s) · {small}."
+        state = "loading" if shape_loading else "ready"    # "loading" keeps the app's status line refreshing
+        return state, f"SDXL ready (loaded in {kept.load_s() or 0:.0f} s){shape_text} · {small}."
 
     def _warm_small_models(self) -> None:
         from PIL import Image
@@ -338,17 +399,18 @@ class ModelManager:
     def drop_early(self) -> None:
         """Stop workers loaded early for steps that will not come (the run failed, or it retries the image)."""
         with self._lock:
-            self._waiting.clear()
+            for task in [t for t, entry in self._waiting.items() if entry[0] == "early"]:
+                del self._waiting[task]
             early = list(self._early.values())
             self._early.clear()
         for worker in early:
             worker.stop(wait_s=0)
 
     def end_run(self) -> None:
-        """After a run: drop unused early workers and, in the app, start reloading SDXL for the next run."""
+        """After a run: drop unused early workers and, in the app, reload the kept models for the next run."""
         self.drop_early()
         if self.keep_warm:
-            self._warm_sdxl()
+            self.restore_kept()
 
     def cancel(self) -> None:
         """Stop the current run's GPU work now (called from another thread). Workers started for this run

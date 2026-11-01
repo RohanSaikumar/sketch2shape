@@ -319,12 +319,18 @@ class Sketch2Shape:
         return self._log_candidates(ctx, "give_up")
 
     def _start_3d_early(self, ctx: RunContext) -> None:
-        """Free SDXL's RAM and GPU, then start loading the shape model while the line scores are computed.
-        If the pick then fails the line check, the retry drops the shape worker and SDXL reloads."""
+        """The image is (very likely) chosen: free SDXL's GPU and RAM, then start loading the texture model
+        on that GPU, and the shape model if it is not kept loaded, while the line scores are computed and
+        the shape is built. If the pick then fails the line check, the retry drops them and SDXL reloads."""
         self._models_call("release_kept")
         load_early = getattr(self.models, "load_early", None)
-        if load_early is not None and self.cfg.workers.load_shape_early:
+        if load_early is None:
+            return
+        w, r = self.cfg.workers, self.cfg.reconstruct
+        if w.load_shape_early:
             load_early("shape", "hunyuan", ctx.store, **shape_model_job(self.cfg))
+        if w.load_paint_early and r.texture:
+            load_early("paint", "paint", ctx.store, model=r.model)
 
     def _log_candidates(self, ctx: RunContext, outcome: str) -> str:
         ctx.store.set("candidates", [
@@ -336,7 +342,7 @@ class Sketch2Shape:
         return outcome
 
     def _prepare(self, ctx: RunContext) -> str:
-        self._models_call("release_kept")   # no more images to make: the 3D models need SDXL's RAM
+        self._start_3d_early(ctx)           # no more images to make (already done if GPT picked the image)
         ctx.prepared = prepare(self.models, ctx.best, ctx.store, self.cfg)
         ctx.store.set("prepared", asdict(ctx.prepared))
         return "ok"

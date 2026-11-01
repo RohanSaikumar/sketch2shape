@@ -134,7 +134,7 @@ def paint_test(models, cfg, sketch_store, intent, picked: Path, typed: str, stam
         label = "on" if delight else "off"
         out = sketch_store.path(f"09_textured_delight_{label}.glb")
         started = time.monotonic()
-        models.run_worker("paint", "hunyuan", sketch_store, model=r.model, mesh=str(shape_path),
+        models.run_worker("paint", "paint", sketch_store, model=r.model, mesh=str(shape_path),
                           image=str(prepared.rgba_path), out=str(out), cpu_offload_on_oom=True, delight=delight)
         run = RunStore(cfg.runs_dir, f"compare-{stamp}-delight-{label}")
         for name in ("01_input.png", "02_lineart.png", "06_prepared.png"):

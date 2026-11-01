@@ -6,13 +6,17 @@ worker_timeout_s: 1800        # one GPU worker job; the first run also downloads
 
 gpus:                         # each heavy step runs in its own worker process on this GPU (T4: 15 GB)
   sdxl: 0                     # SDXL + ControlNet: 13.4 GB peak for 2 images
-  hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB), then texture (12.8 GB); 0 also works on a single GPU
+  hunyuan: 1                  # Hunyuan3D-2 shape (<= 9.4 GB); 0 also works on a single GPU
+  paint: 0                    # Hunyuan3D-2 texture (12.8 GB): on SDXL's GPU, which is free once the image is chosen,
+                              # so the shape model can stay loaded on GPU 1
 
 workers:                      # only with two GPUs; on one GPU every step loads its model in a fresh worker
-  keep_loaded: [generate]     # SDXL stays loaded between runs; it is stopped for the 3D steps of a run (its ~6 GB
-                              # of RAM made the texture model's load run out of Kaggle's 30 GB) and reloads after
-  load_shape_early: true      # when GPT picks the image, the shape model starts loading during the line check
-  min_free_ram_gb: 16         # a model loads early only with this much RAM free (each Hunyuan load peaks ~15 GB)
+  keep_loaded: [generate, shape]   # loaded between runs: SDXL on GPU 0 (stopped once the image is chosen, reloaded
+                              # after the run) and the shape model on GPU 1 (~100 s of loading saved per run)
+  load_shape_early: true      # without a kept shape model: it starts loading when GPT picks the image
+  load_paint_early: true      # the texture model starts loading on GPU 0 when the image is chosen (~70 s hidden)
+  make_room_for: [paint]      # before this loads fresh, kept models are stopped if RAM is short (it was killed once)
+  min_free_ram_gb: 16         # a model loads only with this much RAM free (each Hunyuan load peaks ~15 GB)
 
 preprocess:
   size: 1024

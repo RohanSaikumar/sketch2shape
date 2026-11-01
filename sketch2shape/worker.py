@@ -213,6 +213,17 @@ TASKS = {"ping": (load_ping, run_ping), "generate": (load_generate, run_generate
 
 # ------------------------------------------------------------------ running jobs
 
+def rss_now_gb() -> float | None:
+    """This worker's resident memory right now (Linux), so the RAM a loaded model keeps can be measured."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return round(int(line.split()[1]) / 2**20, 2)
+    except OSError:
+        pass
+    return None
+
+
 def failure(exc: Exception) -> dict:
     result = {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()[-3000:]}
     print(result["traceback"], file=sys.stderr, flush=True)
@@ -241,6 +252,7 @@ def run_one(run, model, job: dict) -> dict:
         result["max_rss_gb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2)
     except ImportError:
         pass
+    result["rss_gb"] = rss_now_gb()             # what it keeps while it waits for the next job
     return result
 
 
@@ -250,7 +262,7 @@ def serve(load_path: Path, ready_path: Path) -> int:
     except Exception as exc:
         write_json(ready_path, failure(exc))
         return 1
-    write_json(ready_path, {"ok": True, "load_s": load_s})
+    write_json(ready_path, {"ok": True, "load_s": load_s, "rss_gb": rss_now_gb()})
     while True:
         line = sys.stdin.readline()
         if not line.strip():                    # stdin closed: the app or the run is done with this worker

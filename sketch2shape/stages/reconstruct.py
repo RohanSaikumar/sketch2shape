@@ -37,7 +37,7 @@ def paint_mesh(models, mesh, prepared, store, cfg):
     shape_path = store.path("08_shape_checked.glb")
     mesh.export(shape_path)                         # the shape after validation and any repair
     out = store.path("09_textured.glb")
-    result = models.run_worker("paint", "hunyuan", store, model=r.model, mesh=str(shape_path),
+    result = models.run_worker("paint", "paint", store, model=r.model, mesh=str(shape_path),
                                image=str(prepared.rgba_path), out=str(out),
                                cpu_offload_on_oom=bool(r.paint_cpu_offload_on_oom), delight=bool(r.paint_delight))
     return as_trimesh(trimesh.load(out, force="scene")), result["mode"]
