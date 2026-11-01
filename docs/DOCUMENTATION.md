@@ -128,7 +128,7 @@ The settings below were chosen by a side-by-side comparison on real sketches ([s
 | **Typed description** | the user's words first, then the name if missing; no realism words if the text asks for a style (cartoon, toy, low poly, statue, ...) | as for the kind of sketch | as above |
 
 Negative prompts (one set per kind of sketch) block multiple objects, cropping, frames and borders,
-scenery, text and shadows; the rough-doodle set also blocks flat results (flat, 2D, relief, plaque,
+scenery, text and shadows; the rough-doodle and scene sets also block flat results (flat, 2D, relief, plaque,
 cookie cutter, sticker) and glossy highlights that would be baked into the texture. Every prompt was checked to fit CLIP's 77-token limit (SDXL silently drops the rest),
 with room left for the image check's "avoid" words.
 
