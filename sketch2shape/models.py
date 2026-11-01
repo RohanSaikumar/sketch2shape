@@ -5,10 +5,12 @@ The three heavy GPU steps (SDXL, Hunyuan3D-2 shape, Hunyuan3D-2 texture) run in 
 CPU RAM: keeping them in one long-lived process ran out of Kaggle's 30 GB, and a crash inside one model
 cannot take down the app. Loading the models took about half of every run, so with two GPUs:
 
-  - SDXL stays loaded between runs in a worker of its own on GPU 0, which nothing else uses;
-  - the shape model starts loading on GPU 1 while the image is still being made; that worker exits after
-    its one job, so the texture model then has the GPU and the RAM to itself;
-  - the texture model loads in a fresh worker that exits when it is done, as before.
+  - in the app, SDXL stays loaded between runs in a worker of its own on GPU 0; once the image is chosen
+    it is stopped (its ~6 GB of RAM made the texture model's load run out of memory) and it reloads in
+    the background after the run, while the result is being looked at;
+  - when the image check picks an image, the shape model starts loading on GPU 1 while the line scores
+    are computed; that worker exits after its one job, so the texture model has the GPU and RAM to itself;
+  - the texture model loads in a fresh worker that exits when it is done.
 
 A worker loads early only when no other worker is loading and enough RAM is free, because each Hunyuan
 model briefly needs about 15 GB of RAM while it loads. With one GPU every job uses a fresh worker.
@@ -146,6 +148,7 @@ class ModelManager:
         self._waiting: dict[str, tuple] = {}            # task -> (role, store, load) to start once it is safe
         self._fresh: set[subprocess.Popen] = set()      # one-job workers running now
         self._cancel = threading.Event()
+        self.keep_warm = False                          # the app: reload SDXL after each run (warm_up sets it)
 
     # --------------------------------------------------------- GPU workers
 
@@ -279,11 +282,23 @@ class ModelManager:
     def warm_up(self) -> None:
         """At app start: begin loading SDXL into its kept worker, and the CPU models in a background thread,
         so the first run does not wait for them."""
+        self.keep_warm = True
+        self._warm_sdxl()
+        threading.Thread(target=self._warm_small_models, daemon=True).start()
+
+    def _warm_sdxl(self) -> None:
         from .stages.generate import model_job
 
         if "generate" in self.cfg.workers.keep_loaded and self.separate_gpus():
             self._kept_worker("generate", "sdxl", model_job(self.cfg))
-        threading.Thread(target=self._warm_small_models, daemon=True).start()
+
+    def release_kept(self) -> None:
+        """Stop the kept workers (SDXL) so the 3D models have their RAM; they are idle by then."""
+        with self._lock:
+            kept = list(self._kept.values())
+            self._kept.clear()
+        for worker in kept:
+            worker.stop()
 
     def sdxl_status(self) -> tuple[str, str]:
         """("loading" | "ready" | "off" | "failed", one line of text) for the app's model status line."""
@@ -292,6 +307,8 @@ class ModelManager:
         with self._lock:
             kept = self._kept.get("generate")
         if kept is None:
+            if self.keep_warm:
+                return "off", "SDXL is paused while a 3D model is made (it needs the RAM) and reloads after the run."
             return "off", "SDXL loads on the first run."
         if not kept.alive():
             return "failed", f"The SDXL worker stopped; the next run loads it again (log: runs/_workers/{kept.log_path.name})."
@@ -318,14 +335,20 @@ class ModelManager:
     def new_run(self) -> None:
         self._cancel.clear()
 
-    def end_run(self) -> None:
-        """Stop workers loaded early for steps the run never reached (it failed or was cancelled first)."""
+    def drop_early(self) -> None:
+        """Stop workers loaded early for steps that will not come (the run failed, or it retries the image)."""
         with self._lock:
             self._waiting.clear()
             early = list(self._early.values())
             self._early.clear()
         for worker in early:
             worker.stop(wait_s=0)
+
+    def end_run(self) -> None:
+        """After a run: drop unused early workers and, in the app, start reloading SDXL for the next run."""
+        self.drop_early()
+        if self.keep_warm:
+            self._warm_sdxl()
 
     def cancel(self) -> None:
         """Stop the current run's GPU work now (called from another thread). Workers started for this run
@@ -417,19 +440,20 @@ def free_memory() -> None:
 
 
 def free_ram_gb() -> float | None:
-    """RAM this container can still use, in GB: its cgroup limit minus its working set (reclaimable file
-    cache not counted), else MemAvailable. None where neither can be read (e.g. Windows)."""
+    """RAM this container can still use, in GB: its cgroup limit minus what it uses besides file cache (the
+    kernel drops cached model files before it kills a process), else MemAvailable. None where neither can
+    be read (e.g. Windows)."""
     cgroups = (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat",
-                "inactive_file"),
+                "file"),
                ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-                "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
-    for limit_file, usage_file, stat_file, inactive in cgroups:
+                "/sys/fs/cgroup/memory/memory.stat", "total_cache"))
+    for limit_file, usage_file, stat_file, cache in cgroups:
         try:
             limit = Path(limit_file).read_text().strip()
             if limit == "max" or int(limit) >= 2**60:
                 continue
             stat = dict(line.split()[:2] for line in Path(stat_file).read_text().splitlines() if line.strip())
-            used = int(Path(usage_file).read_text()) - int(stat.get(inactive, 0))
+            used = int(Path(usage_file).read_text()) - int(stat.get(cache, 0))
             return round((int(limit) - used) / 2**30, 1)
         except (OSError, ValueError):
             continue

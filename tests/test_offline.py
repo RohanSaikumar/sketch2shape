@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import zipfile
 
+import cv2
 import numpy as np
 import pytest
 import trimesh
@@ -334,6 +335,32 @@ def test_end_run_stops_a_worker_the_run_never_used(serving_models, store):
     early = serving_models._early["ping"]
     serving_models.end_run()
     assert not early.alive() and not serving_models._early
+
+
+def test_sdxl_pauses_for_the_3d_steps_and_reloads_after_the_run(serving_models, store):
+    serving_models.keep_warm = True                 # as in the app
+    serving_models.run_worker("ping", "sdxl", store)
+    first = serving_models._kept["ping"]
+    serving_models.release_kept()                   # the 3D models need its RAM
+    assert not first.alive() and not serving_models._kept
+    serving_models.cfg.workers.keep_loaded = ["generate"]       # end_run reloads SDXL: point it at ping instead
+    serving_models._warm_sdxl = lambda: serving_models._kept_worker("ping", "sdxl", {})
+    serving_models.end_run()
+    assert serving_models._kept["ping"].alive() and serving_models._kept["ping"] is not first
+
+
+def test_dense_hatching_becomes_an_outline_and_plain_lines_stay():
+    from sketch2shape.stages.preprocess import outline_hatching
+    plain = np.zeros((512, 512), np.uint8)
+    cv2.circle(plain, (256, 256), 180, 255, 6)
+    assert (outline_hatching(plain) == plain).all()
+    hatched = plain.copy()
+    for x in range(180, 330, 7):                    # a shaded patch inside the circle
+        cv2.line(hatched, (x, 180), (x + 20, 330), 255, 4)
+    out = outline_hatching(hatched)
+    inside = out[215:295, 215:295]
+    assert inside.mean() < 0.1 * hatched[215:295, 215:295].mean()     # the scribbles are gone
+    assert out[256, 256 - 180 - 2: 256 - 180 + 3].any()                # the circle is still there
 
 
 def test_models_loaded_ahead_match_the_jobs_sent_later(cfg):

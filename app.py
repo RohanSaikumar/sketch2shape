@@ -52,6 +52,34 @@ CSS = """
 """
 BLOCKS_TAKES_CSS = "css" in inspect.signature(gr.Blocks.__init__).parameters
 
+# The 3D views use Google's <model-viewer> with neutral lighting. Gradio's Model3D lights scenes with a cool
+# environment that showed pure white and grey test models as lavender, side by side with model-viewer
+# showing them white and grey; the GLB files themselves were fine.
+VIEWER_SCRIPT = ('<script type="module" '
+                 'src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>')
+HEAD_IN_BLOCKS = "head" in inspect.signature(gr.Blocks.__init__).parameters
+FILE_ROUTE = "/gradio_api/file=" if int(gr.__version__.split(".")[0]) >= 5 else "/file="
+
+
+def launch_options() -> dict:
+    """The page extras that this Gradio version takes in launch() rather than in Blocks()."""
+    return {**({} if BLOCKS_TAKES_CSS else {"css": CSS}), **({} if HEAD_IN_BLOCKS else {"head": VIEWER_SCRIPT})}
+
+
+def viewer_html(path, caption: str, height: int = 440) -> str:
+    """A rotatable view of a GLB file (it must be under the app's allowed paths), or a placeholder."""
+    head = f'<div style="font-size:.88em;opacity:.75;margin:0 0 4px 2px">{html.escape(caption)}</div>'
+    box = (f"height:{height}px;width:100%;border:1px solid var(--border-color-primary);border-radius:8px;"
+           "background:#fff")
+    if not path or not Path(path).exists():
+        return head + (f'<div style="{box};display:flex;align-items:center;justify-content:center;color:#999">'
+                       "The 3D model appears here</div>")
+    target = Path(path).resolve()
+    src = f"{FILE_ROUTE}{target.as_posix()}?v={int(target.stat().st_mtime)}"   # a new file, not the cached one
+    return head + (f'<model-viewer src="{html.escape(src)}" camera-controls auto-rotate auto-rotate-delay="1500" '
+                   'rotation-per-second="20deg" environment-image="neutral" exposure="1" shadow-intensity="0.6" '
+                   f'interaction-prompt="none" style="{box}"></model-viewer>')
+
 # Only one model is made at a time. Gradio's queue enforces that per request, but a page reload cancels the
 # request while the pipeline thread keeps running; this guard stops a second run from starting beside it.
 BUSY = {"thread": None, "started": 0.0, "run": "", "ctx": None}
@@ -187,7 +215,7 @@ def past_runs(runs_dir: Path) -> list[tuple[str, str]]:
 def show_past_run(runs_dir: Path, run_name: str | None):
     """Model, downloads, images and run details of an earlier run."""
     if not run_name:
-        return None, None, [], None
+        return viewer_html(None, "Earlier model (drag to rotate)", 360), None, [], None
     run_dir = Path(runs_dir) / run_name
     try:
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -195,8 +223,8 @@ def show_past_run(runs_dir: Path, run_name: str | None):
         manifest = {}
     files = [str(p) for p in (run_dir / "model.glb", run_dir / "model_obj.zip") if p.exists()]
     glb = run_dir / "model.glb"
-    return ((str(glb) if glb.exists() else None), (files or None), gallery_items(run_dir, manifest),
-            run_summary(manifest))
+    return (viewer_html(glb, "Earlier model (drag to rotate)", 360), (files or None),
+            gallery_items(run_dir, manifest), run_summary(manifest))
 
 
 def has_strokes(canvas) -> bool:
@@ -262,7 +290,7 @@ def model_maker(pipeline: Sketch2Shape):
         started = time.monotonic()
         used = "your drawing" if source == "canvas" else "the uploaded image"
         # clear the previous model's results as the new run starts
-        yield (gr.update(value=None, label="3D model (drag to rotate)"), None, [], None,
+        yield (viewer_html(None, "3D model (drag to rotate)"), None, [], None,
                panel(0.0, "Starting", f"Using {used}."))
         done, current, fraction = [], None, 0.0
         shown_items, shown_shape = 0, None
@@ -301,7 +329,7 @@ def model_maker(pipeline: Sketch2Shape):
             viewer_update = skip
             if shapes and shapes[-1] != shown_shape:
                 shown_shape = shapes[-1]
-                viewer_update = gr.update(value=str(shown_shape), label="3D shape (texture still in progress)")
+                viewer_update = viewer_html(shown_shape, "3D shape (texture still in progress)")
             yield viewer_update, skip, gallery_update, skip, panel(fraction, title, detail, done)
 
         result = holder.get("result")
@@ -320,7 +348,7 @@ def model_maker(pipeline: Sketch2Shape):
                           "another one.", done, state="idle")
         else:
             final = panel(fraction, "Could not make a model", html.escape(result.message), done, state="error")
-        viewer = gr.update(value=str(result.glb_path), label="3D model (drag to rotate)") if result.glb_path else skip
+        viewer = viewer_html(result.glb_path, "3D model (drag to rotate)") if result.glb_path else skip
         yield viewer, files or None, gallery_items(run_dir, result.manifest), run_summary(result.manifest), final
 
     return make_model
@@ -330,7 +358,7 @@ def model_maker(pipeline: Sketch2Shape):
 
 def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
     make_model = model_maker(pipeline)
-    blocks_args = {"css": CSS} if BLOCKS_TAKES_CSS else {}
+    blocks_args = {**({"css": CSS} if BLOCKS_TAKES_CSS else {}), **({"head": VIEWER_SCRIPT} if HEAD_IN_BLOCKS else {})}
     with gr.Blocks(title="Sketch2Shape", **blocks_args) as demo:
         gr.Markdown("# Sketch2Shape\nDraw a sketch or upload one, optionally describe it, and get a textured "
                     "3D model you can download as .glb or .obj.")
@@ -356,7 +384,7 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                     button = gr.Button("Make 3D model", variant="primary", scale=3)
                     stop = gr.Button("Cancel", variant="stop", interactive=False, scale=1)
             with gr.Column():
-                viewer = gr.Model3D(label="3D model (drag to rotate)", clear_color=(1, 1, 1, 1), height=440)
+                viewer = gr.HTML(viewer_html(None, "3D model (drag to rotate)"))
                 files = gr.File(label="Downloads", file_count="multiple")
         gallery = gr.Gallery(label="Steps so far", columns=5, height=240)
         with gr.Accordion("Run details", open=False):
@@ -367,7 +395,7 @@ def build_app(pipeline: Sketch2Shape) -> gr.Blocks:
                 history = gr.Dropdown(choices=past_runs(runs_dir), label="Pick an earlier run", scale=4)
                 refresh = gr.Button("Refresh list", scale=1)
             with gr.Row():
-                old_viewer = gr.Model3D(label="Earlier model (drag to rotate)", clear_color=(1, 1, 1, 1), height=360)
+                old_viewer = gr.HTML(viewer_html(None, "Earlier model (drag to rotate)", 360))
                 old_files = gr.File(label="Its downloads", file_count="multiple")
             old_gallery = gr.Gallery(label="Its steps", columns=5, height=200)
             old_details = gr.JSON(label="Its run details")
@@ -422,10 +450,9 @@ def main() -> None:
     pipeline = Sketch2Shape(cfg)
     pipeline.models.warm_up()               # SDXL and the CPU models load while the page opens
     demo = build_app(pipeline)
-    launch_args = {} if BLOCKS_TAKES_CSS else {"css": CSS}
     demo.queue(default_concurrency_limit=1).launch(share=args.share, server_port=args.port,
                                                    allowed_paths=[str(runs), str(ROOT / "examples")],
-                                                   **launch_args)
+                                                   **launch_options())
 
 
 if __name__ == "__main__":

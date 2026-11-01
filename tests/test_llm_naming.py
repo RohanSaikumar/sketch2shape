@@ -276,12 +276,38 @@ def score_step(cfg, tmp_path, monkeypatch, verdicts, totals, kind="object"):
     return pipe, ctx
 
 
+class RecordingModels:
+    """Records the worker calls the pipeline makes around gate 1."""
+    def __init__(self):
+        self.calls = []
+
+    def release_kept(self):
+        self.calls.append("release_kept")
+
+    def load_early(self, task, role, store, **load):
+        self.calls.append(f"load_early:{task}")
+
+    def drop_early(self):
+        self.calls.append("drop_early")
+
+
 def test_gate_one_passes_the_checked_pick_when_it_follows_the_lines(cfg, tmp_path, monkeypatch):
     pipe, ctx = score_step(cfg, tmp_path, monkeypatch, [{"best": 1}],
                            {"05_candidate_r0_0.png": 0.9, "05_candidate_r0_1.png": 0.6})
+    pipe.models = RecordingModels()
     assert pipe._score(ctx) == "pass"
     assert ctx.best is ctx.candidates[1]                   # the check's pick, not the higher line score
     assert ctx.candidates[0].scores == {}                  # a rejected image is not even cut out
+    # once picked, SDXL makes way and the shape model starts loading during the line check
+    assert pipe.models.calls == ["release_kept", "load_early:shape"]
+
+
+def test_a_failed_pick_drops_the_early_shape_worker_before_retrying(cfg, tmp_path, monkeypatch):
+    pipe, ctx = score_step(cfg, tmp_path, monkeypatch, [{"best": 0}],
+                           {"05_candidate_r0_0.png": 0.1, "05_candidate_r0_1.png": 0.9})
+    pipe.models = RecordingModels()
+    assert pipe._score(ctx) == "retry"
+    assert pipe.models.calls == ["release_kept", "load_early:shape", "drop_early"]
 
 
 def test_gate_one_retries_with_avoid_words_when_everything_is_rejected(cfg, tmp_path, monkeypatch):

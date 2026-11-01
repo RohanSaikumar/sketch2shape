@@ -1,8 +1,9 @@
 """Stage 1: turn a canvas drawing or a photo of a paper sketch into clean, centred line art.
 
 Steps: flatten transparency onto white, invert light-on-dark sketches, even out paper lighting,
-threshold, drop specks, crop to the strokes with padding, square to 1024 px, close tiny gaps and
-thicken thin pencil lines. Also builds a filled silhouette of the sketch for the fidelity score.
+threshold, drop specks, crop to the strokes with padding, square to 1024 px, close tiny gaps,
+thicken thin pencil lines, and turn dense hatching into the outline of the shaded area. Also builds
+a filled silhouette of the sketch for the fidelity score.
 """
 from __future__ import annotations
 
@@ -65,6 +66,33 @@ def tidy_strokes(mask: np.ndarray) -> np.ndarray:
     return cv2.dilate(mask, kernel, iterations=1)              # keeps thin pencil lines visible to the ControlNet
 
 
+def outline_hatching(strokes: np.ndarray, density: float = 0.5) -> np.ndarray:
+    """Replace areas of dense hatching or scribbled shading with the outline of the area.
+
+    The scribble ControlNet copies hatch strokes literally (a football came out covered in scribbles);
+    the outline keeps the area's shape, and the prompt says what the object is, so the model paints it
+    (black panels on a football). Tested on real sketches: only the football's panels and the landscape's
+    shaded trees changed; the headphones, watering can and mug lines stay as they are."""
+    size = strokes.shape[0]
+    window, shrink = int(size * 0.05) | 1, int(size * 0.02) | 1     # 51 and 21 px at 1024
+    on = (strokes > 0).astype(np.uint8)
+    dense = (cv2.blur(on.astype(np.float32), (window, window)) > density).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(dense)
+    big = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= 0.002 * dense.size]
+    if not big:
+        return strokes
+    # the dense area reaches about half a window past the hatching: shrink it back to the shaded area
+    region = cv2.erode(np.isin(labels, big).astype(np.uint8),
+                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (shrink, shrink)))
+    region = fill_holes(region) > 0
+    kept = np.where(region, 0, strokes).astype(np.uint8)
+    kept = remove_small_components(kept, int(400 * (size / 1024) ** 2))     # hatch ends left at the edge
+    outline = cv2.morphologyEx(region.astype(np.uint8), cv2.MORPH_GRADIENT,
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    kept[outline > 0] = 255
+    return kept
+
+
 def fill_silhouette(strokes: np.ndarray) -> np.ndarray:
     closed = cv2.morphologyEx(strokes, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
     filled = fill_holes(closed)
@@ -84,6 +112,8 @@ def preprocess(image, store, cfg, source: str = "upload") -> SketchAsset:
     if ratio < float(p.min_stroke_ratio):
         raise EmptySketchError("The sketch looks empty. Draw or upload a sketch with clearly visible lines.")
     strokes = tidy_strokes(crop_square(strokes, float(p.pad_ratio), int(p.size)))
+    if p.outline_hatching:
+        strokes = outline_hatching(strokes)
     lineart = 255 - strokes
     control = lineart if cfg.generate.control_polarity == "bw" else strokes
     return SketchAsset(

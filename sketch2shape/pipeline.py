@@ -20,7 +20,7 @@ from typing import Callable
 from .config import load_config
 from .contracts import Candidate, ExportBundle, Intent, PreparedImage, SketchAsset
 from .llm import provider
-from .models import ModelManager, free_memory, rss_gb
+from .models import ModelManager, free_memory, free_ram_gb, rss_gb
 from .runstore import RunStore
 from .stages.export import export_mesh
 from .stages.generate import generate
@@ -231,7 +231,7 @@ class Sketch2Shape:
                 nxt = TRANSITIONS.get((state, outcome)) or self._recover(ctx, state)
             ctx.store.manifest["transitions"].append(
                 {"state": state.value, "outcome": outcome, "next": nxt.value, "seconds": round(seconds, 2),
-                 "cleanup_s": round(cleanup_s, 2), "main_rss_gb": rss_gb()})
+                 "cleanup_s": round(cleanup_s, 2), "main_rss_gb": rss_gb(), "free_ram_gb": free_ram_gb()})
             if on_event:
                 on_event(state.value, outcome, ctx.elapsed())
             state = nxt
@@ -256,10 +256,6 @@ class Sketch2Shape:
             ctx.message = str(exc)
             return "empty"
         ctx.store.set("sketch", asdict(ctx.sketch))
-        load_early = getattr(self.models, "load_early", None)
-        if load_early is not None and self.cfg.workers.load_shape_early:
-            # the shape model's GPU is idle while the image is made, so it starts loading now
-            load_early("shape", "hunyuan", ctx.store, **shape_model_job(self.cfg))
         return "ok"
 
     def _understand(self, ctx: RunContext) -> str:
@@ -292,6 +288,8 @@ class Sketch2Shape:
         stronger sketch control. A scene's diorama is judged by the check alone."""
         fresh = [c for c in ctx.candidates if c.round == ctx.rounds and not c.scores and not c.judged]
         verdict = check_images(ctx.sketch, ctx.intent, fresh, self.cfg, ctx.store)
+        if verdict is not None and verdict["best"] is not None:
+            self._start_3d_early(ctx)       # the pick will very likely pass: overlap the shape load with scoring
         score_candidates(self.models, ctx.sketch, ctx.intent,
                          [c for c in fresh if c.judged != "rejected"], self.cfg, ctx.store)
         usable = [c for c in ctx.candidates if c.judged != "rejected" and c.scores]
@@ -302,6 +300,7 @@ class Sketch2Shape:
             return self._log_candidates(ctx, "pass")
         if ctx.rounds < s.max_rounds and not ctx.over_budget():
             ctx.rounds += 1
+            self._models_call("drop_early")     # a shape load started for the pick would hold RAM SDXL needs
             if verdict is not None and verdict["best"] is None:     # all rejected: avoid what the check saw
                 if verdict["avoid"]:            # replaces earlier ones, so the prompt stays within 77 tokens
                     ctx.intent.negative_prompt = f"{verdict['avoid']}, {ctx.negative_base or ctx.intent.negative_prompt}"
@@ -319,6 +318,14 @@ class Sketch2Shape:
                            f"using the best one ({ctx.best.total:.2f}).")
         return self._log_candidates(ctx, "give_up")
 
+    def _start_3d_early(self, ctx: RunContext) -> None:
+        """Free SDXL's RAM and GPU, then start loading the shape model while the line scores are computed.
+        If the pick then fails the line check, the retry drops the shape worker and SDXL reloads."""
+        self._models_call("release_kept")
+        load_early = getattr(self.models, "load_early", None)
+        if load_early is not None and self.cfg.workers.load_shape_early:
+            load_early("shape", "hunyuan", ctx.store, **shape_model_job(self.cfg))
+
     def _log_candidates(self, ctx: RunContext, outcome: str) -> str:
         ctx.store.set("candidates", [
             {"path": c.path.name, "round": c.round, "seed": c.seed, "index": c.index,
@@ -329,6 +336,7 @@ class Sketch2Shape:
         return outcome
 
     def _prepare(self, ctx: RunContext) -> str:
+        self._models_call("release_kept")   # no more images to make: the 3D models need SDXL's RAM
         ctx.prepared = prepare(self.models, ctx.best, ctx.store, self.cfg)
         ctx.store.set("prepared", asdict(ctx.prepared))
         return "ok"

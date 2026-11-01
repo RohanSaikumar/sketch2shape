@@ -18,7 +18,9 @@ Built for TechZephyr 4.0 (IIT Bhubaneswar), problem statement "Sketch2Shape AI".
 ```
 sketch (canvas or upload) + optional description
   1 preprocess    OpenCV: flatten, invert if dark, even out paper lighting, threshold, drop specks,
-                  crop and centre, square to 1024 px, close gaps, thicken thin lines, fill a silhouette
+                  crop and centre, square to 1024 px, close gaps, thicken thin lines, turn dense hatching
+                  into the outline of the shaded area (the ControlNet copied scribbles onto a football),
+                  fill a silhouette
   2 understand    name the object: one vision-LLM call if OPENAI_API_KEY (or ANTHROPIC_API_KEY) is set,
                   otherwise CLIP zero-shot over ~170 everyday objects; the same call suggests real colours
                   and surface (keeping any the user typed), judges the drawing clean or rough, says whether
@@ -65,12 +67,15 @@ ran out of Kaggle's 30 GB of CPU RAM (peak 31 GB while loading the texture model
 give memory back, and a crash inside one model cannot take down the app. Loading the models was about
 half of every run, so with two GPUs (`workers` in `config.yaml`):
 
-- SDXL stays loaded between runs in its own worker on GPU 0, which nothing else uses; the app starts
-  loading it, and CLIP and background removal, as soon as it starts;
-- the shape model starts loading on GPU 1 while the image is still being made; that worker exits after
-  its one job, so the texture model, loaded fresh, has GPU 1 and the RAM to itself;
+- in the app, SDXL stays loaded between runs in its own worker on GPU 0; the app starts loading it, and
+  CLIP and background removal, as soon as it starts. Once the image is chosen SDXL is stopped: its
+  ~6 GB of RAM plus the texture model's ~15 GB load ran out of Kaggle's 30 GB and the texture step was
+  killed. It reloads in the background after the run, while the result is being looked at;
+- when the image check picks an image, the shape model starts loading on GPU 1 while the line scores and
+  cut-out are computed; that worker exits after its one job, so the texture model has GPU 1 and the RAM
+  to itself;
 - a model loads early only when no other worker is loading and at least 16 GB of RAM is free (each
-  Hunyuan model briefly needs ~15 GB while loading).
+  Hunyuan model briefly needs ~15 GB while loading); every step logs `free_ram_gb` in `transitions`.
 
 The models, settings and seeds are the same, so the output does not change. With one GPU every step
 loads its model in a fresh worker. **Cancel** in the app stops a run: GPU work stops at once (SDXL
@@ -192,6 +197,8 @@ input as a paper photo, a rough doodle or a clean drawing, so settings can be tu
 | A step fails with "... worker failed" | Open the worker log named in the message (`runs/<id>/worker_*.log`, or `runs/_workers/serve_*.log` for the kept SDXL worker) for the model's own error. |
 | GPU 0 out of memory in `eval_batch.py` while the app is open | The app keeps SDXL loaded on GPU 0. Stop the app first, or set `workers.keep_loaded: []`. |
 | Cancel takes a few seconds | GPU steps stop at once; a step on the CPU (scoring, up to ~30 s) finishes first. |
+| White models looked lavender in the app | Gradio's Model3D lighting did that (pure white test spheres showed lavender there and white in model-viewer). The app now uses Google's `<model-viewer>` with neutral lighting, loaded from cdn.jsdelivr.net; the GLB files were always fine. |
+| Run details say "texture_mode": "projected colours" and "paint worker failed (killed ...)" | The texture model ran out of CPU RAM. Fixed by stopping SDXL before the 3D steps; check `free_ram_gb` in the run's `transitions`. |
 | CUDA extension build fails with pip | `scripts/setup.sh` falls back to `python setup.py install`; its log is in `/tmp/s2s_build_<name>.log`. |
 | Model looks mirrored in projected-colour fallback | Set `export.flip_projection_x: true`. |
 | "The sketch looks empty" | Draw darker or thicker lines, or upload a higher-contrast photo. |
