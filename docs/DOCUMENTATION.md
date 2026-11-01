@@ -97,8 +97,6 @@ Turns any input (a canvas drawing, a scan, a phone photo of paper) into clean bl
 7. A filled silhouette of the sketch is saved for scoring.
 8. Empty input (under 0.1% stroke pixels) stops the run with "The sketch looks empty".
 
-![Hatching turned into outlines: before (left) and two settings](images/hatching_outline.jpg)
-
 Outputs: `01_input.png`, `02_lineart.png`, `03_control.png` (what the ControlNet sees), `04_sketch_mask.png`.
 
 ### 3.2 Understand (`stages/understand.py`, `llm.py`)
@@ -332,8 +330,6 @@ with the same seeds and let the image check mark the usable one. Variants: the o
 | Headphones (paper photo) | clean drawing | plain product photo with only the name | "black plastic" put the headphones on a dark background, bad for the cut-out |
 | Cat (mouse doodle) | rough doodle | LLM colours + realism words; firmer control (0.7 for 80%) as good as lighter | the plain product prompt turned the doodle into a tangle of rope |
 
-![Comparison sheet for the watering can: one row per variant, green = picked by the image check, red = rejected](images/comparison_watering_can.jpg)
-
 ### 8.2 Background removal
 
 The same six images from real runs were cut out by the app's model (BRIA RMBG-2.0 via rembg), u2net and
@@ -341,15 +337,11 @@ BiRefNet. RMBG-2.0 was clean on all six. u2net left see-through patches (most of
 bottom of a ball), which become holes or lumps in 3D. BiRefNet cut holes through a scribbled pattern.
 The app's current model was kept.
 
-![Cut-outs: generated image, RMBG-2.0 (used), u2net, BiRefNet; magenta = removed](images/cutout_comparison.jpg)
-
 ### 8.3 Viewer colours
 
 White models looked lavender in the app. Pure white and grey test spheres, exported exactly as the app
 exports models, were shown side by side: Gradio's Model3D tinted them (bottom), Google's model-viewer
 showed their true colours (top). The files were fine; the app's viewer was replaced.
-
-![Pure white, white and grey test spheres in model-viewer (top) and Gradio Model3D (bottom)](images/viewer_tint_test.jpg)
 
 ### 8.4 Failures that shaped the design
 
@@ -362,8 +354,8 @@ showed their true colours (top). The files were fine; the app's viewer was repla
 | The texture step was killed; models came out with flat projected colours | SDXL kept loaded (~6 GB) + texture load (~15 GB) exceeded 30 GB RAM | SDXL released once the image is chosen; RAM guard; RAM logged per step |
 | Models looked black, metallic or lavender | library default materials; Gradio viewer lighting | matte export material; model-viewer |
 
-Outputs from along the way (the finished examples are in the [README](../README.md#results) and
-[`examples/`](../examples/README.md)):
+The finished examples (input, preview, GLB and OBJ for each) are in [`examples/`](../examples/README.md).
+One run from along the way:
 
 **Rough doodle path.** A mouse doodle of a sleeping cat was judged rough: lighter sketch control, a
 realistic prompt, two images, the image check picks one. Left to right: doodle, generated image, cut-out.
@@ -371,22 +363,6 @@ realistic prompt, two images, the image check picks one. Left to right: doodle, 
 ![Cat doodle, generated image, cut-out](images/cat_steps.jpg)
 
 ![Cat 3D model](images/cat_model.jpg)
-
-**Scene path.** A sideways phone photo of a landscape was turned upright and recognised as a scene,
-so it was built as a diorama. The first round was rejected by the image check (a round frame,
-scenery behind); the second passed.
-
-![Landscape sketch photo](images/landscape_input.jpg)
-
-![Landscape: cleaned sketch, rejected image, picked image, cut-out](images/landscape_steps.jpg)
-
-![Diorama model](images/landscape_diorama_model.jpg)
-
-**Still open.** A football with hatched black panels became a white ball: the hatching is turned
-into outlines so it is not copied as scribbles, but the colour it stood for is lost on clean
-drawings ([section 12](#12-limitations-and-known-issues)). A typed description ("black and white football") restores it.
-
-![Football sketch with hatched panels and the white ball made from it](images/ball_input_and_model.jpg)
 
 ---
 
